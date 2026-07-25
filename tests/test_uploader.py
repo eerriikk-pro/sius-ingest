@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -91,6 +92,62 @@ class SupabaseUploaderTests(unittest.TestCase):
         self.assertGreater(raw_payload["raw_size_bytes"], 0)
         shot_payload = json.loads(requests[3][0].data)
         self.assertEqual(shot_payload[0]["score_tenths"], 94)
+
+    def test_partitions_mixed_schema_versions_into_compatible_batches(self) -> None:
+        requests = []
+
+        def open_request(request, *, timeout):
+            requests.append((request, timeout))
+            return FakeResponse()
+
+        with TemporaryDirectory() as temporary:
+            database = Path(temporary) / "sius.sqlite3"
+            with SQLiteEventStore(database) as store:
+                service = IngestionService(
+                    store=store,
+                    config=IngestionConfig(range_id="range-a"),
+                )
+                service.process(framed_record(b"_STAT;5;6;0;50;0", sequence=1))
+                service.process(framed_record(b"_PRST;5;6;0;51;0", sequence=2))
+
+                with sqlite3.connect(database) as connection:
+                    row = connection.execute(
+                        """
+                        SELECT id, payload_json
+                        FROM outbox
+                        WHERE topic = 'sius_raw_events'
+                        ORDER BY id
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                    assert row is not None
+                    legacy_payload = json.loads(row[1])
+                    legacy_payload.pop("connection_id")
+                    legacy_payload.pop("fields")
+                    connection.execute(
+                        "UPDATE outbox SET payload_json = ? WHERE id = ?",
+                        (json.dumps(legacy_payload), row[0]),
+                    )
+
+                uploader = SupabaseUploader(
+                    store=store,
+                    config=SupabaseConfig(
+                        url="https://example.supabase.co",
+                        api_key="sb_secret_test",
+                    ),
+                    http_open=open_request,
+                )
+
+                summary = uploader.upload_once()
+                status = store.status()
+
+        self.assertEqual(summary.uploaded, 2)
+        self.assertEqual(status.pending_uploads, 0)
+        self.assertEqual(len(requests), 2)
+        for request, _ in requests:
+            self.assertIn("/sius_raw_events?", request.full_url)
+            payload = json.loads(request.data)
+            self.assertEqual(len(payload), 1)
 
     def test_failed_upload_remains_pending_with_error(self) -> None:
         def fail_request(request, *, timeout):

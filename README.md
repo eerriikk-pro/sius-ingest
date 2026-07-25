@@ -24,6 +24,8 @@ only the Python standard library at runtime.
 - deduplicates SIUSData's connection backlog and replayed captures;
 - commits each shot, relay update, and upload job in one SQLite transaction;
 - uploads idempotently to Supabase with retry state kept in SQLite.
+- uploads outbox rows from older collector versions without mixing incompatible
+  PostgREST bulk payload shapes.
 
 See [docs/protocol-observations.md](docs/protocol-observations.md) for the
 evidence and explicit assumptions behind the parser.

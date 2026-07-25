@@ -93,24 +93,25 @@ class SupabaseUploader:
             topic_items = grouped.pop(topic, [])
             if not topic_items:
                 continue
-            attempted += len(topic_items)
-            try:
-                self._post(topic, topic_items)
-            except UploadError as exc:
-                retry_seconds = _retry_delay(topic_items)
-                retry_at = isoformat_utc(utc_now() + timedelta(seconds=retry_seconds))
-                self._store.mark_failed(
-                    topic_items,
-                    error=str(exc),
-                    retry_at=retry_at,
-                )
-                return UploadSummary(
-                    attempted=attempted,
-                    uploaded=uploaded,
-                    failed=len(topic_items),
-                    error=str(exc),
-                )
-            uploaded += self._store.mark_uploaded(topic_items)
+            for compatible_items in _partition_by_payload_keys(topic_items):
+                attempted += len(compatible_items)
+                try:
+                    self._post(topic, compatible_items)
+                except UploadError as exc:
+                    retry_seconds = _retry_delay(compatible_items)
+                    retry_at = isoformat_utc(utc_now() + timedelta(seconds=retry_seconds))
+                    self._store.mark_failed(
+                        compatible_items,
+                        error=str(exc),
+                        retry_at=retry_at,
+                    )
+                    return UploadSummary(
+                        attempted=attempted,
+                        uploaded=uploaded,
+                        failed=len(compatible_items),
+                        error=str(exc),
+                    )
+                uploaded += self._store.mark_uploaded(compatible_items)
 
         if grouped:
             unknown_items = [item for values in grouped.values() for item in values]
@@ -167,6 +168,16 @@ class SupabaseUploader:
 def _retry_delay(items: Sequence[OutboxItem]) -> int:
     highest_attempt = max((item.attempt_count for item in items), default=0)
     return min(300, 2 ** min(highest_attempt + 1, 8))
+
+
+def _partition_by_payload_keys(items: Sequence[OutboxItem]) -> list[list[OutboxItem]]:
+    """Split mixed-version rows into PostgREST-compatible bulk requests."""
+
+    partitions: dict[tuple[str, ...], list[OutboxItem]] = {}
+    for item in items:
+        signature = tuple(sorted(item.payload))
+        partitions.setdefault(signature, []).append(item)
+    return list(partitions.values())
 
 
 def _authentication_headers(api_key: str) -> dict[str, str]:
