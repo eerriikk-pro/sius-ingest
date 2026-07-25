@@ -1,101 +1,205 @@
 # sius-ingest
 
-`sius-ingest` is a small, lossless TCP capture tool for exploring the data
-emitted by SIUSData. The current version deliberately does **not** guess at the
-SIUS message schema. Its job is to preserve enough evidence to determine the
-stream's encoding, framing, message types, and field layout safely.
+`sius-ingest` captures the TCP stream exposed by SIUSData, preserves the
+original bytes, parses the observed practice-shot format, groups shots into
+sighter blocks and match relays, and stores everything in a durable local
+SQLite database. An optional uploader synchronizes the local outbox to
+Supabase/Postgres.
 
-## What it captures
+The collector is intended to run beside SIUSData on the range Windows PC, but
+the same commands work on macOS for development and capture replay. It uses
+only the Python standard library at runtime.
 
-Each run creates a timestamped capture directory containing:
+## Current behavior
 
-- `payload.bin` — every received payload byte, in arrival order
-- `chunks.jsonl` — TCP receive chunks with timestamps, hashes, and Base64 data
-- `records.jsonl` — best-effort newline-delimited records
-- `connections.jsonl` — connection and disconnection events
-- `session.json` — capture settings and final counters
+- reconnects to SIUSData automatically;
+- writes a lossless capture for future protocol analysis;
+- retains every received record locally, including unknown and malformed ones;
+- parses the `_SHOT` and `_SHID` shapes observed at this range;
+- associates shots with the firing number carried by `_SHOT`;
+- distinguishes sighters from match shots;
+- starts a new relay on a sighter/match transition or reset shot counter;
+- does not assume a relay contains exactly 60 shots;
+- deduplicates SIUSData's connection backlog and replayed captures;
+- commits each shot, relay update, and upload job in one SQLite transaction;
+- uploads idempotently to Supabase with retry state kept in SQLite.
 
-TCP chunk boundaries are not protocol message boundaries. `payload.bin` and
-`chunks.jsonl` are therefore the authoritative evidence; `records.jsonl` is a
-convenient derived view.
-
-Capture directories are ignored by Git so real range data and possible member
-identifiers are not committed accidentally.
+See [docs/protocol-observations.md](docs/protocol-observations.md) for the
+evidence and explicit assumptions behind the parser.
 
 ## Requirements
 
 - Python 3.11 or newer
-- Network access to the computer running SIUSData
+- SIUSData TCP access, normally `127.0.0.1:4000` on the range PC
+- optional Supabase project for remote storage
 
-No runtime packages outside the Python standard library are required.
-
-## Installation
+## Install
 
 ```bash
 git clone https://github.com/eerriikk-pro/sius-ingest.git
 cd sius-ingest
-python3 -m venv .venv
+python -m venv .venv
+```
+
+On macOS or Linux:
+
+```bash
 source .venv/bin/activate
 python -m pip install -e .
 ```
 
-## Capture from the range Mac
+On Windows PowerShell:
 
-With SIUSData running at `192.168.1.101:4000`:
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+```
+
+## Collect and store live data
+
+On the SIUSData Windows PC:
+
+```powershell
+sius-ingest live `
+  --host 127.0.0.1 `
+  --port 4000 `
+  --range-id my-range `
+  --database data\sius.sqlite3
+```
+
+For the currently tested Mac-to-PC connection:
+
+```bash
+sius-ingest live \
+  --host 192.168.1.101 \
+  --port 4000 \
+  --range-id my-range \
+  --database data/sius.sqlite3
+```
+
+The command prints one summary per accepted shot. It also creates a timestamped
+directory under `captures/` with:
+
+- `payload.bin` — all received payload bytes in arrival order;
+- `chunks.jsonl` — exact TCP chunks, timestamps, hashes, and Base64 data;
+- `records.jsonl` — reconstructed newline-delimited records;
+- `connections.jsonl` — connection and disconnection events;
+- `session.json` — capture settings and final counters.
+
+Press `Control-C` to stop cleanly. Both `captures/` and local database files
+are ignored by Git because they can contain member information.
+
+To print every raw record as well as shot summaries, add
+`--verbose-records`. The original capture-only command remains available:
 
 ```bash
 sius-capture --host 192.168.1.101 --port 4000
 ```
 
-The tool prints the capture directory and each complete newline-delimited
-record it observes. Leave it running, fire the test shots, then press
-`Control-C`. It reconnects automatically if the TCP connection drops.
+## Replay a capture
 
-To run directly from a checkout without installing:
+Captured data can be parsed again without SIUSData:
 
 ```bash
-PYTHONPATH=src python3 -m sius_ingest --host 192.168.1.101 --port 4000
+sius-ingest replay \
+  captures/sius-20260725T000127Z \
+  --range-id my-range \
+  --database data/sius.sqlite3
 ```
 
-Useful options:
+Replay verifies the hash of each captured record by default. Replaying the
+same capture, or receiving the same backlog after reconnecting, does not create
+duplicate canonical shots.
+
+## Inspect local status
+
+```bash
+sius-ingest status --database data/sius.sqlite3
+sius-ingest status --database data/sius.sqlite3 --json
+```
+
+The result includes raw-event, shot, session, relay, pending-upload, and
+failed-upload counts.
+
+## Configure Supabase
+
+1. Create a Supabase project.
+2. Run [supabase/schema.sql](supabase/schema.sql) in the SQL editor.
+3. Copy `.env.example` to `.env` and set the project URL and service-role key.
+4. Export those environment variables in the collector process.
+
+The service-role key is a server secret. Keep it only on the range PC, never
+commit it, and never include it in a browser or mobile application.
+
+Upload the current outbox once:
+
+```bash
+sius-ingest upload --database data/sius.sqlite3
+```
+
+Or leave a separate uploader process running:
+
+```bash
+sius-ingest upload --database data/sius.sqlite3 --watch
+```
+
+Collection does not depend on Supabase being reachable. Network or API
+failures remain in the SQLite outbox and are retried with backoff.
+
+## Configuration
+
+Frequently used options have environment-variable equivalents:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SIUS_HOST` | `127.0.0.1` | SIUSData host |
+| `SIUS_PORT` | `4000` | SIUSData TCP port |
+| `SIUS_OUTPUT` | `captures` | lossless capture parent directory |
+| `SIUS_DATABASE` | `data/sius.sqlite3` | local SQLite database |
+| `SIUS_RANGE_ID` | `default-range` | stable range identifier |
+| `SUPABASE_URL` | none | Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | none | private uploader credential |
+
+Run `sius-ingest COMMAND --help` for all command-specific options.
+
+## Architecture
+
+The transport and storage layers are deliberately independent:
 
 ```text
---output PATH            Parent directory for captures (default: captures)
---once                   Stop instead of reconnecting after a disconnect
---connect-timeout SEC    Connection timeout (default: 5)
---reconnect-delay SEC    Delay between retries (default: 2)
---quiet                  Do not print reconstructed records
+SIUSData TCP
+    -> lossless capture
+    -> newline framing
+    -> conservative parser
+    -> relay sessionizer
+    -> SQLite events + canonical shots + outbox
+    -> optional Supabase uploader
 ```
 
-Equivalent defaults can be supplied through `SIUS_HOST`, `SIUS_PORT`, and
-`SIUS_OUTPUT`.
+Key modules:
 
-## Suggested first capture
+- `tcp_source.py`, `framing.py`, `capture.py` — byte-level acquisition;
+- `parser.py`, `models.py` — observed protocol and typed domain records;
+- `sessionizer.py` — deterministic lane/session/relay transitions;
+- `outbox.py` — SQLite schema, transactions, deduplication, and outbox;
+- `replay_source.py` — verified replay of previous captures;
+- `uploader.py` — ordered, idempotent Supabase PostgREST uploads;
+- `app.py` — operational `live`, `replay`, `status`, and `upload` commands.
 
-1. Start the capture before shooting.
-2. Fire three shots on one lane, several seconds apart.
-3. Fire two shots on a second lane.
-4. Reset or start a new practice on the first lane and fire two more shots.
-5. Press `Control-C`.
-6. Keep notes with each lane, displayed score, and approximate time.
-7. Preserve any matching SIUSData export alongside the capture, but do not
-   commit real range data to this repository.
+Unknown fields keep `*_raw` names, and every parsed record retains its complete
+field list. Improving the parser therefore does not require recollecting old
+data.
 
 ## Development
 
-Run the standard-library test suite:
+Install development tools and run all checks:
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+python -m pip install -e '.[dev]'
+ruff check .
+ruff format --check .
+PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-The package is intentionally separated into:
-
-- `tcp_source.py` — connection, receive, and reconnect behavior
-- `framing.py` — tentative newline framing
-- `capture.py` — lossless files and metadata
-- `models.py` — typed events shared between those layers
-- `cli.py` — the user-facing capture command
-
-Parsing, durable outbox storage, and database uploading should be added only
-after real captures establish the SIUS stream's shape.
+Tests use synthetic firing numbers and records. Real captures and athlete names
+must not be committed.
