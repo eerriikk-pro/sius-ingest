@@ -42,8 +42,12 @@ try {
     }
 
     $Hash = (Get-FileHash -Path $Executable -Algorithm SHA256).Hash.ToLowerInvariant()
-    "$Hash  sius-ingest.exe" |
-        Set-Content -Path $ChecksumFile -Encoding ascii
+    $ChecksumContents = "$Hash  sius-ingest.exe`n"
+    [System.IO.File]::WriteAllText(
+        $ChecksumFile,
+        $ChecksumContents,
+        [System.Text.Encoding]::ASCII
+    )
 
     Write-Host "Built $Executable"
     Write-Host "SHA-256: $Hash"
