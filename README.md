@@ -13,6 +13,7 @@ only the Python standard library at runtime.
 ## Current behavior
 
 - reconnects to SIUSData automatically;
+- starts live collection and background upload together when double-clicked;
 - writes a lossless capture for future protocol analysis;
 - retains every received record locally, including unknown and malformed ones;
 - parses the `_SHOT` and `_SHID` shapes observed at this range;
@@ -75,21 +76,26 @@ code-signed, so Windows may identify its publisher as unknown.
 
 Place `sius-ingest.exe` in a permanent folder on the range PC. With SIUSData
 running, double-click the executable to begin live collection using the
-defaults. The console window remains open and shows connection and shot
-activity; press `Control-C` to stop cleanly.
+defaults. If `SUPABASE_URL` and `SUPABASE_SECRET_KEY` are saved in the Windows
+environment, the same process also uploads continuously. No launcher script or
+second console is needed. The console window remains open and shows connection,
+shot, and upload activity; press `Control-C` to stop cleanly.
 
 The equivalent explicit PowerShell command is:
 
 ```powershell
-.\sius-ingest.exe live `
+.\sius-ingest.exe run `
   --host 127.0.0.1 `
   --port 4000 `
   --range-id my-range `
   --database data\sius.sqlite3
 ```
 
-Launching without arguments uses `127.0.0.1:4000`, range ID `default-range`,
-SQLite database `data\sius.sqlite3`, and capture directory `captures\`.
+Launching without arguments is equivalent to `run`. It uses
+`127.0.0.1:4000`, range ID `default-range`, SQLite database
+`data\sius.sqlite3`, and capture directory `captures\`. If either Supabase
+setting is missing, it clearly reports that upload is disabled and continues
+collecting locally.
 
 To verify the download against the generated checksum:
 
@@ -184,12 +190,22 @@ PC, use a temporary test key and delete it from Supabase after testing. A
 restricted ingestion endpoint should replace it before permanent unattended
 deployment.
 
+On a trusted Windows range computer, save both values once through
+**Edit environment variables for your account**:
+
+```text
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SECRET_KEY=sb_secret_replace_me
+```
+
+Restart any open consoles after saving them. From then on, double-clicking
+`sius-ingest.exe` starts both collection and upload automatically.
+
 On a shared PC, provide the URL on the command line and let the collector read
 the temporary key from a masked prompt:
 
 ```powershell
-.\sius-ingest.exe upload `
-  --watch `
+.\sius-ingest.exe run `
   --url https://your-project.supabase.co `
   --prompt-secret-key
 ```
@@ -199,11 +215,14 @@ For a trusted server, the equivalent environment configuration is:
 ```bash
 export SUPABASE_URL=https://your-project.supabase.co
 export SUPABASE_SECRET_KEY=sb_secret_replace_me
-sius-ingest upload --watch
+sius-ingest run
 ```
 
 Collection does not depend on Supabase being reachable. Network or API
 failures remain in the SQLite outbox and are retried with backoff.
+
+The standalone `live` and `upload --watch` commands remain available for
+diagnostics and split-process deployments.
 
 ### Data retained remotely
 

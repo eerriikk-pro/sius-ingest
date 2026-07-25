@@ -1,14 +1,22 @@
 import unittest
 from argparse import Namespace
 from os import environ
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Event
 from unittest.mock import patch
 
-from sius_ingest.app import _effective_argv, _resolve_secret_key, build_parser
+from sius_ingest.app import (
+    _effective_argv,
+    _resolve_secret_key,
+    _run_combined,
+    build_parser,
+)
 
 
 class EffectiveArgumentsTests(unittest.TestCase):
-    def test_empty_arguments_default_to_live_collection(self) -> None:
-        self.assertEqual(_effective_argv([]), ["live"])
+    def test_empty_arguments_default_to_combined_collection_and_upload(self) -> None:
+        self.assertEqual(_effective_argv([]), ["run"])
 
     def test_explicit_command_is_preserved(self) -> None:
         self.assertEqual(
@@ -18,7 +26,7 @@ class EffectiveArgumentsTests(unittest.TestCase):
 
     def test_process_arguments_are_used_when_not_injected(self) -> None:
         with patch("sys.argv", ["sius-ingest.exe"]):
-            self.assertEqual(_effective_argv(None), ["live"])
+            self.assertEqual(_effective_argv(None), ["run"])
 
         with patch("sys.argv", ["sius-ingest.exe", "--help"]):
             self.assertEqual(_effective_argv(None), ["--help"])
@@ -41,6 +49,71 @@ class EffectiveArgumentsTests(unittest.TestCase):
             secret_key = _resolve_secret_key(args)
 
         self.assertEqual(secret_key, "sb_secret_test")
+
+    def test_combined_mode_without_credentials_collects_locally(self) -> None:
+        with TemporaryDirectory() as temp_directory:
+            database = Path(temp_directory) / "sius.sqlite3"
+            with patch.dict(
+                environ,
+                {
+                    "SUPABASE_URL": "",
+                    "SUPABASE_SECRET_KEY": "",
+                    "SUPABASE_SERVICE_ROLE_KEY": "",
+                },
+            ):
+                args = build_parser().parse_args(["run", "--database", str(database), "--once"])
+
+            with (
+                patch("sius_ingest.app._run_live", return_value=0) as run_live,
+                patch("builtins.print") as print_mock,
+            ):
+                result = _run_combined(args)
+
+        self.assertEqual(result, 0)
+        run_live.assert_called_once_with(args)
+        self.assertIn("Supabase upload disabled", print_mock.call_args.args[0])
+
+    def test_combined_mode_runs_uploader_until_live_collection_stops(self) -> None:
+        uploader_started = Event()
+        uploader_stopped = Event()
+
+        def background_uploader(
+            args: Namespace,
+            secret_key: str,
+            stop_event: Event,
+        ) -> None:
+            self.assertEqual(secret_key, "sb_secret_test")
+            uploader_started.set()
+            if stop_event.wait(1):
+                uploader_stopped.set()
+
+        def live_collection(args: Namespace) -> int:
+            self.assertTrue(uploader_started.wait(1))
+            return 0
+
+        with TemporaryDirectory() as temp_directory:
+            database = Path(temp_directory) / "sius.sqlite3"
+            with patch.dict(
+                environ,
+                {
+                    "SUPABASE_URL": "https://example.supabase.co",
+                    "SUPABASE_SECRET_KEY": "sb_secret_test",
+                },
+            ):
+                args = build_parser().parse_args(["run", "--database", str(database), "--once"])
+
+            with (
+                patch(
+                    "sius_ingest.app._run_background_uploader",
+                    new=background_uploader,
+                ),
+                patch("sius_ingest.app._run_live", new=live_collection),
+                patch("builtins.print"),
+            ):
+                result = _run_combined(args)
+
+        self.assertEqual(result, 0)
+        self.assertTrue(uploader_stopped.is_set())
 
 
 if __name__ == "__main__":

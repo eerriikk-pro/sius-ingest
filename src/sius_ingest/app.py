@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from datetime import timedelta
 from getpass import getpass
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 
 from sius_ingest.ingest import IngestionConfig, IngestionService
 from sius_ingest.models import FramedRecord, IngestResult, SessionizerConfig, StoreStatus
@@ -29,24 +29,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    run = subparsers.add_parser(
+        "run",
+        help="capture live data and upload it when Supabase is configured",
+    )
+    _add_live_arguments(run)
+    _add_supabase_arguments(run, combined=True)
+    run.set_defaults(handler=_run_combined)
+
     live = subparsers.add_parser("live", help="capture and ingest the live TCP stream")
-    live.add_argument("--host", default=os.getenv("SIUS_HOST", "127.0.0.1"))
-    live.add_argument("--port", type=int, default=_env_int("SIUS_PORT", 4000))
-    live.add_argument(
-        "--capture-output",
-        type=Path,
-        default=Path(os.getenv("SIUS_OUTPUT", "captures")),
-    )
-    live.add_argument("--connect-timeout", type=float, default=5.0)
-    live.add_argument("--reconnect-delay", type=float, default=2.0)
-    live.add_argument("--once", action="store_true")
-    live.add_argument(
-        "--verbose-records",
-        action="store_true",
-        help="print every raw record in addition to shot summaries",
-    )
-    live.add_argument("--quiet", action="store_true", help="suppress shot summaries")
-    _add_ingestion_arguments(live)
+    _add_live_arguments(live)
     live.set_defaults(handler=_run_live)
 
     replay = subparsers.add_parser(
@@ -69,23 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="upload the durable outbox to Supabase",
     )
     upload.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
-    upload.add_argument("--url", default=os.getenv("SUPABASE_URL"))
-    upload.add_argument(
-        "--secret-key",
-        "--service-role-key",
-        dest="secret_key",
-        default=(os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
-        help="Supabase sb_secret key (legacy service-role JWT also supported)",
-    )
-    upload.add_argument(
-        "--prompt-secret-key",
-        action="store_true",
-        help="read the secret key from a masked prompt instead of command history",
-    )
-    upload.add_argument("--batch-size", type=int, default=250)
-    upload.add_argument("--timeout", type=float, default=15.0)
+    _add_supabase_arguments(upload, combined=False)
     upload.add_argument("--watch", action="store_true")
-    upload.add_argument("--interval", type=float, default=5.0)
     upload.set_defaults(handler=_run_upload)
 
     return parser
@@ -97,10 +74,60 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _effective_argv(argv: Sequence[str] | None) -> list[str]:
-    """Start live collection when launched without command-line arguments."""
+    """Start collection and optional upload when launched without arguments."""
 
     arguments = list(sys.argv[1:] if argv is None else argv)
-    return arguments or ["live"]
+    return arguments or ["run"]
+
+
+def _run_combined(args: argparse.Namespace) -> int:
+    """Run live ingestion with an optional background Supabase uploader."""
+
+    secret_key = _resolve_secret_key(args)
+    missing_settings = [
+        name
+        for name, value in (
+            ("SUPABASE_URL", args.url),
+            ("SUPABASE_SECRET_KEY", secret_key),
+        )
+        if not value
+    ]
+    if missing_settings:
+        missing = ", ".join(missing_settings)
+        print(
+            f"Supabase upload disabled; missing {missing}. Live data will still be stored locally.",
+            flush=True,
+        )
+        return _run_live(args)
+
+    if args.upload_interval <= 0:
+        raise SystemExit("--upload-interval must be positive")
+
+    # Complete schema migration before the live and upload connections open
+    # concurrently. SQLite WAL then allows the writer and uploader to coexist.
+    with SQLiteEventStore(args.database):
+        pass
+
+    stop_event = Event()
+    uploader_thread = Thread(
+        target=_run_background_uploader,
+        args=(args, secret_key, stop_event),
+        name="sius-supabase-uploader",
+        daemon=True,
+    )
+    print(f"Supabase upload enabled: {args.url}", flush=True)
+    uploader_thread.start()
+    try:
+        return _run_live(args)
+    finally:
+        stop_event.set()
+        uploader_thread.join(timeout=args.upload_timeout + 1)
+        if uploader_thread.is_alive():
+            print(
+                "Supabase uploader is still finishing a network request; "
+                "the local outbox remains durable.",
+                flush=True,
+            )
 
 
 def _run_live(args: argparse.Namespace) -> int:
@@ -202,17 +229,65 @@ def _run_upload(args: argparse.Namespace) -> int:
     if args.interval <= 0:
         raise SystemExit("--interval must be positive")
 
-    with SQLiteEventStore(args.database) as store:
+    stop_event = Event()
+    return _upload_loop(
+        database=args.database,
+        url=args.url,
+        secret_key=secret_key,
+        batch_size=args.batch_size,
+        timeout=args.timeout,
+        interval=args.interval,
+        watch=args.watch,
+        stop_event=stop_event,
+    )
+
+
+def _run_background_uploader(
+    args: argparse.Namespace,
+    secret_key: str,
+    stop_event: Event,
+) -> None:
+    try:
+        _upload_loop(
+            database=args.database,
+            url=args.url,
+            secret_key=secret_key,
+            batch_size=args.upload_batch_size,
+            timeout=args.upload_timeout,
+            interval=args.upload_interval,
+            watch=True,
+            stop_event=stop_event,
+        )
+    except Exception as exc:
+        print(
+            f"Supabase uploader stopped unexpectedly: {type(exc).__name__}: {exc}. "
+            "Collection is continuing locally.",
+            flush=True,
+        )
+
+
+def _upload_loop(
+    *,
+    database: Path,
+    url: str,
+    secret_key: str,
+    batch_size: int,
+    timeout: float,
+    interval: float,
+    watch: bool,
+    stop_event: Event,
+) -> int:
+    with SQLiteEventStore(database) as store:
         uploader = SupabaseUploader(
             store=store,
             config=SupabaseConfig(
-                url=args.url,
+                url=url,
                 api_key=secret_key,
-                timeout=args.timeout,
+                timeout=timeout,
             ),
         )
-        while True:
-            summary = uploader.upload_once(limit=args.batch_size)
+        while not stop_event.is_set():
+            summary = uploader.upload_once(limit=batch_size)
             if summary.attempted:
                 print(
                     f"upload attempted={summary.attempted} uploaded={summary.uploaded} "
@@ -220,15 +295,18 @@ def _run_upload(args: argparse.Namespace) -> int:
                 )
             if summary.error:
                 print(f"upload error: {summary.error}")
-                if not args.watch:
+                if not watch:
                     return 1
-            if not args.watch:
+            if not watch:
                 return 0
             try:
-                Event().wait(args.interval)
+                if stop_event.wait(interval):
+                    return 0
             except KeyboardInterrupt:
+                stop_event.set()
                 print("\nUploader stopped.")
                 return 0
+    return 0
 
 
 def _resolve_secret_key(args: argparse.Namespace) -> str | None:
@@ -246,6 +324,50 @@ def _add_ingestion_arguments(parser: argparse.ArgumentParser) -> None:
         default=240.0,
         help="start a new athlete lane session after this idle period",
     )
+
+
+def _add_live_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--host", default=os.getenv("SIUS_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=_env_int("SIUS_PORT", 4000))
+    parser.add_argument(
+        "--capture-output",
+        type=Path,
+        default=Path(os.getenv("SIUS_OUTPUT", "captures")),
+    )
+    parser.add_argument("--connect-timeout", type=float, default=5.0)
+    parser.add_argument("--reconnect-delay", type=float, default=2.0)
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument(
+        "--verbose-records",
+        action="store_true",
+        help="print every raw record in addition to shot summaries",
+    )
+    parser.add_argument("--quiet", action="store_true", help="suppress shot summaries")
+    _add_ingestion_arguments(parser)
+
+
+def _add_supabase_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    combined: bool,
+) -> None:
+    prefix = "upload-" if combined else ""
+    parser.add_argument("--url", default=os.getenv("SUPABASE_URL"))
+    parser.add_argument(
+        "--secret-key",
+        "--service-role-key",
+        dest="secret_key",
+        default=(os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
+        help="Supabase sb_secret key (legacy service-role JWT also supported)",
+    )
+    parser.add_argument(
+        "--prompt-secret-key",
+        action="store_true",
+        help="read the secret key from a masked prompt instead of command history",
+    )
+    parser.add_argument(f"--{prefix}batch-size", type=int, default=250)
+    parser.add_argument(f"--{prefix}timeout", type=float, default=15.0)
+    parser.add_argument(f"--{prefix}interval", type=float, default=5.0)
 
 
 def _format_ingest_result(result: IngestResult) -> str | None:
