@@ -35,14 +35,16 @@ HttpOpen = Callable[..., Any]
 @dataclass(frozen=True, slots=True)
 class SupabaseConfig:
     url: str
-    service_role_key: str
+    api_key: str
     timeout: float = 15.0
 
     def __post_init__(self) -> None:
         if not self.url.startswith(("https://", "http://")):
             raise ValueError("Supabase URL must start with http:// or https://")
-        if not self.service_role_key:
-            raise ValueError("Supabase service-role key must not be empty")
+        if not self.api_key:
+            raise ValueError("Supabase secret key must not be empty")
+        if self.api_key.startswith("sb_publishable_"):
+            raise ValueError("Supabase uploader requires a secret key, not a publishable key")
         if self.timeout <= 0:
             raise ValueError("timeout must be positive")
 
@@ -139,18 +141,13 @@ class SupabaseUploader:
             ensure_ascii=True,
             separators=(",", ":"),
         ).encode()
-        request = Request(
-            endpoint,
-            data=body,
-            method="POST",
-            headers={
-                "apikey": self._config.service_role_key,
-                "Authorization": f"Bearer {self._config.service_role_key}",
-                "Content-Type": "application/json",
-                "Prefer": "resolution=merge-duplicates,return=minimal",
-                "User-Agent": f"sius-ingest/{__version__}",
-            },
-        )
+        headers = {
+            **_authentication_headers(self._config.api_key),
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+            "User-Agent": f"sius-ingest/{__version__}",
+        }
+        request = Request(endpoint, data=body, method="POST", headers=headers)
 
         try:
             with self._http_open(request, timeout=self._config.timeout) as response:
@@ -170,3 +167,12 @@ class SupabaseUploader:
 def _retry_delay(items: Sequence[OutboxItem]) -> int:
     highest_attempt = max((item.attempt_count for item in items), default=0)
     return min(300, 2 ** min(highest_attempt + 1, 8))
+
+
+def _authentication_headers(api_key: str) -> dict[str, str]:
+    """Build headers for current opaque keys and legacy service-role JWTs."""
+
+    headers = {"apikey": api_key}
+    if not api_key.startswith("sb_secret_"):
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers

@@ -6,7 +6,11 @@ from urllib.error import URLError
 
 from sius_ingest.ingest import IngestionConfig, IngestionService
 from sius_ingest.outbox import SQLiteEventStore
-from sius_ingest.uploader import SupabaseConfig, SupabaseUploader
+from sius_ingest.uploader import (
+    SupabaseConfig,
+    SupabaseUploader,
+    _authentication_headers,
+)
 from tests.helpers import framed_record, shot_line
 
 
@@ -54,7 +58,7 @@ class SupabaseUploaderTests(unittest.TestCase):
                     store=store,
                     config=SupabaseConfig(
                         url="https://example.supabase.co",
-                        service_role_key="test-secret",
+                        api_key="sb_secret_test",
                     ),
                     http_open=open_request,
                 )
@@ -69,6 +73,22 @@ class SupabaseUploaderTests(unittest.TestCase):
         self.assertIn("/sius_sessions?", urls[1])
         self.assertIn("/sius_phases?", urls[2])
         self.assertIn("/sius_shots?", urls[3])
+        headers = {key.lower(): value for key, value in requests[0][0].header_items()}
+        self.assertEqual(headers["apikey"], "sb_secret_test")
+        self.assertNotIn("authorization", headers)
+        raw_payload = json.loads(requests[0][0].data)[0]
+        self.assertEqual(raw_payload["connection_id"], "00000000-0000-0000-0000-000000000001")
+        self.assertEqual(raw_payload["record_sequence"], 1)
+        self.assertEqual(raw_payload["firing_point_index"], 5)
+        self.assertEqual(raw_payload["lane_number"], 6)
+        self.assertEqual(raw_payload["shooter_number"], "123")
+        self.assertEqual(raw_payload["event_sequence"], 1)
+        self.assertEqual(raw_payload["device_time_text"], "17:00:01.00")
+        self.assertEqual(raw_payload["annual_ticks"], 1001)
+        self.assertEqual(raw_payload["fields"][0], "_SHOT")
+        self.assertEqual(len(raw_payload["fields"]), 24)
+        self.assertTrue(raw_payload["raw_text"].startswith("_SHOT;5;6;123;"))
+        self.assertGreater(raw_payload["raw_size_bytes"], 0)
         shot_payload = json.loads(requests[3][0].data)
         self.assertEqual(shot_payload[0]["score_tenths"], 94)
 
@@ -99,7 +119,7 @@ class SupabaseUploaderTests(unittest.TestCase):
                     store=store,
                     config=SupabaseConfig(
                         url="https://example.supabase.co",
-                        service_role_key="test-secret",
+                        api_key="sb_secret_test",
                     ),
                     http_open=fail_request,
                 )
@@ -109,7 +129,23 @@ class SupabaseUploaderTests(unittest.TestCase):
 
         self.assertEqual(summary.failed, 1)
         self.assertEqual(status.failed_uploads, 1)
-        self.assertNotIn("test-secret", summary.error or "")
+        self.assertNotIn("sb_secret_test", summary.error or "")
+
+    def test_legacy_service_role_jwt_is_sent_as_bearer_token(self) -> None:
+        self.assertEqual(
+            _authentication_headers("eyJlegacy-service-role"),
+            {
+                "apikey": "eyJlegacy-service-role",
+                "Authorization": "Bearer eyJlegacy-service-role",
+            },
+        )
+
+    def test_publishable_key_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not a publishable key"):
+            SupabaseConfig(
+                url="https://example.supabase.co",
+                api_key="sb_publishable_test",
+            )
 
 
 if __name__ == "__main__":

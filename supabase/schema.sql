@@ -6,21 +6,52 @@
 create table if not exists public.sius_raw_events (
     event_key text primary key,
     range_id text not null,
+    connection_id uuid,
+    record_sequence bigint,
+    firing_point_index integer,
     lane_number integer,
+    shooter_number text,
     event_type text,
+    event_sequence bigint,
+    device_time_text text,
+    annual_ticks bigint,
     received_at timestamptz not null,
+    raw_text text,
+    fields jsonb,
     raw_base64 text not null,
     delimiter_base64 text not null,
+    raw_size_bytes integer,
     raw_sha256 text not null,
     complete boolean not null,
+    partial_reason text,
     parser_version text not null,
     parsed jsonb,
     parse_error text,
     created_at timestamptz not null default now()
 );
 
+-- Keep the script safe to rerun against schemas created by earlier releases.
+alter table public.sius_raw_events
+    add column if not exists connection_id uuid,
+    add column if not exists record_sequence bigint,
+    add column if not exists firing_point_index integer,
+    add column if not exists shooter_number text,
+    add column if not exists event_sequence bigint,
+    add column if not exists device_time_text text,
+    add column if not exists annual_ticks bigint,
+    add column if not exists raw_text text,
+    add column if not exists fields jsonb,
+    add column if not exists raw_size_bytes integer,
+    add column if not exists partial_reason text;
+
 create index if not exists sius_raw_events_range_lane_received_idx
     on public.sius_raw_events (range_id, lane_number, received_at);
+
+create index if not exists sius_raw_events_range_type_received_idx
+    on public.sius_raw_events (range_id, event_type, received_at);
+
+create index if not exists sius_raw_events_range_shooter_received_idx
+    on public.sius_raw_events (range_id, shooter_number, received_at);
 
 create table if not exists public.sius_sessions (
     id uuid primary key,
@@ -87,8 +118,8 @@ create index if not exists sius_shots_session_phase_number_idx
 create index if not exists sius_shots_range_lane_received_idx
     on public.sius_shots (range_id, lane_number, received_at);
 
--- The uploader is intended to use a server-side service-role key. Enabling
--- RLS without public policies keeps anon/authenticated clients out by default.
+-- The uploader uses a server-side secret key, which assumes the service_role
+-- inside Supabase. RLS without public policies keeps browser clients out.
 alter table public.sius_raw_events enable row level security;
 alter table public.sius_sessions enable row level security;
 alter table public.sius_phases enable row level security;
@@ -98,3 +129,10 @@ revoke all on table public.sius_raw_events from anon, authenticated;
 revoke all on table public.sius_sessions from anon, authenticated;
 revoke all on table public.sius_phases from anon, authenticated;
 revoke all on table public.sius_shots from anon, authenticated;
+
+grant select, insert, update on table public.sius_raw_events to service_role;
+grant select, insert, update on table public.sius_sessions to service_role;
+grant select, insert, update on table public.sius_phases to service_role;
+grant select, insert, update on table public.sius_shots to service_role;
+
+notify pgrst, 'reload schema';

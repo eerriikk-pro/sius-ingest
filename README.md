@@ -174,26 +174,55 @@ failed-upload counts.
 
 1. Create a Supabase project.
 2. Run [supabase/schema.sql](supabase/schema.sql) in the SQL editor.
-3. Copy `.env.example` to `.env` and set the project URL and service-role key.
-4. Export those environment variables in the collector process.
+3. Copy the project URL from the project's **Connect** dialog.
+4. In **Settings > API Keys**, create a server-side secret key.
+5. Supply `SUPABASE_URL` and `SUPABASE_SECRET_KEY` to the uploader process.
 
-The service-role key is a server secret. Keep it only on the range PC, never
-commit it, and never include it in a browser or mobile application.
+The `sb_secret_...` key bypasses row-level security and grants elevated access.
+Never commit it or put it in a browser/mobile application. On a shared range
+PC, use a temporary test key and delete it from Supabase after testing. A
+restricted ingestion endpoint should replace it before permanent unattended
+deployment.
 
-Upload the current outbox once:
+On a shared PC, provide the URL on the command line and let the collector read
+the temporary key from a masked prompt:
 
-```bash
-sius-ingest upload --database data/sius.sqlite3
+```powershell
+.\sius-ingest.exe upload `
+  --watch `
+  --url https://your-project.supabase.co `
+  --prompt-secret-key
 ```
 
-Or leave a separate uploader process running:
+For a trusted server, the equivalent environment configuration is:
 
 ```bash
-sius-ingest upload --database data/sius.sqlite3 --watch
+export SUPABASE_URL=https://your-project.supabase.co
+export SUPABASE_SECRET_KEY=sb_secret_replace_me
+sius-ingest upload --watch
 ```
 
 Collection does not depend on Supabase being reachable. Network or API
 failures remain in the SQLite outbox and are retried with backoff.
+
+### Data retained remotely
+
+Supabase receives every unique SIUS record, not only shots. Each raw event
+contains:
+
+- the complete original record as text and Base64 bytes;
+- every semicolon-delimited field in order;
+- original delimiter, byte length, and SHA-256 hash;
+- connection ID and record sequence;
+- local receive timestamp and available SIUS time/counter fields;
+- firing point, lane, and shooter identifiers when present;
+- parser version, parsed payload, unknown fields, and parse errors.
+
+Normalized tables additionally retain athlete sessions, sighter/match phases,
+scores, raw score fields, shot flags, coordinates, and the full parsed `_SHOT`
+payload. Identical backlog retransmissions are deduplicated remotely; every
+arrival and exact TCP chunk remains available in local SQLite and the lossless
+capture directory.
 
 ## Configuration
 
@@ -207,7 +236,7 @@ Frequently used options have environment-variable equivalents:
 | `SIUS_DATABASE` | `data/sius.sqlite3` | local SQLite database |
 | `SIUS_RANGE_ID` | `default-range` | stable range identifier |
 | `SUPABASE_URL` | none | Supabase project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | none | private uploader credential |
+| `SUPABASE_SECRET_KEY` | none | private `sb_secret_...` uploader credential |
 
 Run `sius-ingest COMMAND --help` for all command-specific options.
 

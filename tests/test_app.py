@@ -1,7 +1,9 @@
 import unittest
+from argparse import Namespace
+from os import environ
 from unittest.mock import patch
 
-from sius_ingest.app import _effective_argv
+from sius_ingest.app import _effective_argv, _resolve_secret_key, build_parser
 
 
 class EffectiveArgumentsTests(unittest.TestCase):
@@ -20,6 +22,25 @@ class EffectiveArgumentsTests(unittest.TestCase):
 
         with patch("sys.argv", ["sius-ingest.exe", "--help"]):
             self.assertEqual(_effective_argv(None), ["--help"])
+
+    def test_upload_prefers_current_secret_key_environment_variable(self) -> None:
+        with patch.dict(
+            environ,
+            {
+                "SUPABASE_SECRET_KEY": "sb_secret_current",
+                "SUPABASE_SERVICE_ROLE_KEY": "eyJlegacy",
+            },
+        ):
+            args = build_parser().parse_args(["upload"])
+
+        self.assertEqual(args.secret_key, "sb_secret_current")
+
+    def test_secret_key_can_be_read_from_masked_prompt(self) -> None:
+        args = Namespace(prompt_secret_key=True, secret_key=None)
+        with patch("sius_ingest.app.getpass", return_value=" sb_secret_test "):
+            secret_key = _resolve_secret_key(args)
+
+        self.assertEqual(secret_key, "sb_secret_test")
 
 
 if __name__ == "__main__":

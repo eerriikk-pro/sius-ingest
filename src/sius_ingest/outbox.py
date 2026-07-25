@@ -81,6 +81,8 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
         parsed_payload = message_to_dict(message) if message else None
         lane_number = _lane_number(message)
         shooter_number = _shooter_number(message)
+        raw_text = record.raw.decode("latin-1")
+        fields = list(message.fields) if message else raw_text.split(";")
 
         with self._connection:
             cursor = self._connection.cursor()
@@ -137,13 +139,30 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
                 payload={
                     "event_key": stable_event_key,
                     "range_id": range_id,
+                    "connection_id": str(record.connection_id),
+                    "record_sequence": record.sequence,
+                    "firing_point_index": _message_attribute(
+                        message,
+                        "firing_point_index",
+                    ),
                     "lane_number": lane_number,
+                    "shooter_number": shooter_number,
                     "event_type": message_type,
+                    "event_sequence": _message_attribute(message, "event_sequence"),
+                    "device_time_text": _message_attribute(
+                        message,
+                        "device_time_text",
+                    ),
+                    "annual_ticks": _message_attribute(message, "annual_ticks"),
                     "received_at": isoformat_utc(record.completed_at),
+                    "raw_text": raw_text,
+                    "fields": fields,
                     "raw_base64": b64encode(record.raw).decode("ascii"),
                     "delimiter_base64": b64encode(record.delimiter).decode("ascii"),
+                    "raw_size_bytes": len(record.raw),
                     "raw_sha256": raw_hash,
                     "complete": record.complete,
+                    "partial_reason": record.partial_reason,
                     "parser_version": parser_version,
                     "parsed": parsed_payload,
                     "parse_error": parse_error,
@@ -795,6 +814,15 @@ def _shooter_number(message: ParsedMessage | None) -> str | None:
     if message is None:
         return None
     return message.shooter_number
+
+
+def _message_attribute(
+    message: ParsedMessage | None,
+    name: str,
+) -> object | None:
+    if message is None:
+        return None
+    return getattr(message, name, None)
 
 
 def _result(

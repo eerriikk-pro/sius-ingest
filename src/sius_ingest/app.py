@@ -6,6 +6,7 @@ import os
 import sys
 from collections.abc import Sequence
 from datetime import timedelta
+from getpass import getpass
 from pathlib import Path
 from threading import Event
 
@@ -70,8 +71,16 @@ def build_parser() -> argparse.ArgumentParser:
     upload.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     upload.add_argument("--url", default=os.getenv("SUPABASE_URL"))
     upload.add_argument(
+        "--secret-key",
         "--service-role-key",
-        default=os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
+        dest="secret_key",
+        default=(os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
+        help="Supabase sb_secret key (legacy service-role JWT also supported)",
+    )
+    upload.add_argument(
+        "--prompt-secret-key",
+        action="store_true",
+        help="read the secret key from a masked prompt instead of command history",
     )
     upload.add_argument("--batch-size", type=int, default=250)
     upload.add_argument("--timeout", type=float, default=15.0)
@@ -183,10 +192,12 @@ def _run_status(args: argparse.Namespace) -> int:
 
 
 def _run_upload(args: argparse.Namespace) -> int:
-    if not args.url or not args.service_role_key:
+    if not args.url:
+        raise SystemExit("SUPABASE_URL is required (or pass --url)")
+    secret_key = _resolve_secret_key(args)
+    if not secret_key:
         raise SystemExit(
-            "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required "
-            "(or pass --url and --service-role-key)"
+            "A Supabase secret key is required (use --prompt-secret-key on a shared PC)"
         )
     if args.interval <= 0:
         raise SystemExit("--interval must be positive")
@@ -196,7 +207,7 @@ def _run_upload(args: argparse.Namespace) -> int:
             store=store,
             config=SupabaseConfig(
                 url=args.url,
-                service_role_key=args.service_role_key,
+                api_key=secret_key,
                 timeout=args.timeout,
             ),
         )
@@ -218,6 +229,12 @@ def _run_upload(args: argparse.Namespace) -> int:
             except KeyboardInterrupt:
                 print("\nUploader stopped.")
                 return 0
+
+
+def _resolve_secret_key(args: argparse.Namespace) -> str | None:
+    if args.prompt_secret_key:
+        return getpass("Supabase secret key: ").strip() or None
+    return args.secret_key
 
 
 def _add_ingestion_arguments(parser: argparse.ArgumentParser) -> None:
