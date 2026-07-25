@@ -55,6 +55,47 @@ On Windows PowerShell:
 python -m pip install -e .
 ```
 
+## Download a Windows executable
+
+The repository includes a manual GitHub Actions build that produces a
+self-contained 64-bit Windows console executable:
+
+1. Open the repository's **Actions** tab.
+2. Select **Build Windows executable**.
+3. Choose **Run workflow** on the desired branch.
+4. When the run finishes, download the
+   `sius-ingest-windows-x64-...` artifact.
+5. Extract both `sius-ingest.exe` and `SHA256SUMS.txt` into a permanent folder
+   on the range PC.
+
+The workflow is manual-only; it does not run for pushes or pull requests. The
+artifact is retained by GitHub for 30 days. Python is not required on the PC
+that runs the resulting executable. The executable is not currently
+code-signed, so Windows may identify its publisher as unknown.
+
+With SIUSData running:
+
+```powershell
+.\sius-ingest.exe live `
+  --host 127.0.0.1 `
+  --port 4000 `
+  --range-id my-range `
+  --database data\sius.sqlite3
+```
+
+To verify the download against the generated checksum:
+
+```powershell
+Get-FileHash .\sius-ingest.exe -Algorithm SHA256
+Get-Content .\SHA256SUMS.txt
+```
+
+Developers can create the same executable from a Windows checkout:
+
+```powershell
+.\scripts\build_windows.ps1
+```
+
 ## Collect and store live data
 
 On the SIUSData Windows PC:

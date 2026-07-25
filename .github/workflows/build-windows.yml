@@ -1,0 +1,47 @@
+name: Build Windows executable
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          architecture: x64
+          cache: pip
+
+      - name: Install build dependencies
+        run: python -m pip install -e ".[build]"
+
+      - name: Build executable
+        shell: pwsh
+        run: ./scripts/build_windows.ps1 -SkipInstall
+
+      - name: Smoke test packaged executable
+        shell: pwsh
+        run: |
+          ./dist/sius-ingest.exe --help
+          ./dist/sius-ingest.exe status `
+            --database "${{ runner.temp }}\sius-ingest-smoke.sqlite3" `
+            --json
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: sius-ingest-windows-x64-${{ github.sha }}
+          path: |
+            dist/sius-ingest.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
