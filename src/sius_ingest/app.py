@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import sys
 from collections.abc import Sequence
 from datetime import timedelta
 from pathlib import Path
@@ -82,8 +83,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    args = build_parser().parse_args(_effective_argv(argv))
     return int(args.handler(args))
+
+
+def _effective_argv(argv: Sequence[str] | None) -> list[str]:
+    """Start live collection when launched without command-line arguments."""
+
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    return arguments or ["live"]
 
 
 def _run_live(args: argparse.Namespace) -> int:

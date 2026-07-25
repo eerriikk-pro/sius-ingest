@@ -73,7 +73,12 @@ artifact is retained by GitHub for 30 days. Python is not required on the PC
 that runs the resulting executable. The executable is not currently
 code-signed, so Windows may identify its publisher as unknown.
 
-With SIUSData running:
+Place `sius-ingest.exe` in a permanent folder on the range PC. With SIUSData
+running, double-click the executable to begin live collection using the
+defaults. The console window remains open and shows connection and shot
+activity; press `Control-C` to stop cleanly.
+
+The equivalent explicit PowerShell command is:
 
 ```powershell
 .\sius-ingest.exe live `
@@ -82,6 +87,9 @@ With SIUSData running:
   --range-id my-range `
   --database data\sius.sqlite3
 ```
+
+Launching without arguments uses `127.0.0.1:4000`, range ID `default-range`,
+SQLite database `data\sius.sqlite3`, and capture directory `captures\`.
 
 To verify the download against the generated checksum:
 
