@@ -5,6 +5,8 @@
 
 create table if not exists public.sius_raw_events (
     event_key text primary key,
+    ingest_id bigint generated always as identity,
+    stable_event_key text not null,
     range_id text not null,
     connection_id uuid,
     record_sequence bigint,
@@ -32,6 +34,8 @@ create table if not exists public.sius_raw_events (
 
 -- Keep the script safe to rerun against schemas created by earlier releases.
 alter table public.sius_raw_events
+    add column if not exists ingest_id bigint generated always as identity,
+    add column if not exists stable_event_key text,
     add column if not exists connection_id uuid,
     add column if not exists record_sequence bigint,
     add column if not exists firing_point_index integer,
@@ -43,6 +47,19 @@ alter table public.sius_raw_events
     add column if not exists fields jsonb,
     add column if not exists raw_size_bytes integer,
     add column if not exists partial_reason text;
+
+update public.sius_raw_events
+set stable_event_key = event_key
+where stable_event_key is null;
+
+alter table public.sius_raw_events
+    alter column stable_event_key set not null;
+
+create unique index if not exists sius_raw_events_ingest_id_idx
+    on public.sius_raw_events (ingest_id);
+
+create index if not exists sius_raw_events_stable_event_key_idx
+    on public.sius_raw_events (stable_event_key);
 
 create index if not exists sius_raw_events_range_lane_received_idx
     on public.sius_raw_events (range_id, lane_number, received_at);
@@ -134,5 +151,6 @@ grant select, insert, update on table public.sius_raw_events to service_role;
 grant select, insert, update on table public.sius_sessions to service_role;
 grant select, insert, update on table public.sius_phases to service_role;
 grant select, insert, update on table public.sius_shots to service_role;
+grant usage, select on sequence public.sius_raw_events_ingest_id_seq to service_role;
 
 notify pgrst, 'reload schema';

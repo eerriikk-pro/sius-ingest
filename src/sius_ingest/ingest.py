@@ -11,6 +11,8 @@ from sius_ingest.sessionizer import RelaySessionizer
 @dataclass(frozen=True, slots=True)
 class IngestionConfig:
     range_id: str
+    project_locally: bool = True
+    enqueue_raw_upload: bool = True
 
     def __post_init__(self) -> None:
         if not self.range_id.strip():
@@ -33,7 +35,12 @@ class IngestionService:
         self._parser = parser or ProtocolParser()
         self._sessionizer = sessionizer or RelaySessionizer()
 
-    def process(self, record: FramedRecord) -> IngestResult:
+    def process(
+        self,
+        record: FramedRecord,
+        *,
+        source_event_key: str | None = None,
+    ) -> IngestResult:
         message = None
         parse_error = None
 
@@ -52,4 +59,7 @@ class IngestionService:
             parser_version=PARSER_VERSION,
             range_id=self._config.range_id,
             sessionizer=self._sessionizer,
+            project_locally=self._config.project_locally,
+            enqueue_raw_upload=self._config.enqueue_raw_upload,
+            source_event_key=source_event_key,
         )

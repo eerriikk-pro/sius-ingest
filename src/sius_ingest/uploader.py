@@ -69,17 +69,26 @@ class SupabaseUploader:
         *,
         store: SQLiteEventStore,
         config: SupabaseConfig,
+        topics: Sequence[str] = TOPIC_ORDER,
         http_open: HttpOpen = urlopen,
     ) -> None:
+        requested_topics = set(topics)
+        unsupported = requested_topics.difference(TOPIC_ORDER)
+        if unsupported:
+            names = ", ".join(sorted(unsupported))
+            raise ValueError(f"unsupported upload topics: {names}")
+        if not requested_topics:
+            raise ValueError("at least one upload topic is required")
         self._store = store
         self._config = config
+        self._topics = tuple(topic for topic in TOPIC_ORDER if topic in requested_topics)
         self._http_open = http_open
 
     def upload_once(self, *, limit: int = 250) -> UploadSummary:
         if limit <= 0:
             raise ValueError("limit must be positive")
 
-        items = self._store.pending_outbox(limit=limit)
+        items = self._store.pending_outbox(limit=limit, topics=self._topics)
         if not items:
             return UploadSummary(attempted=0, uploaded=0, failed=0, error=None)
 
@@ -89,7 +98,7 @@ class SupabaseUploader:
 
         attempted = 0
         uploaded = 0
-        for topic in TOPIC_ORDER:
+        for topic in self._topics:
             topic_items = grouped.pop(topic, [])
             if not topic_items:
                 continue

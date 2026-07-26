@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sius-ingest"
-version = "0.2.4"
-description = "Capture, parse, segment, persist, and upload SIUSData practice shots"
+version = "0.3.0"
+description = "Durably forward raw SIUSData events and build replayable Supabase projections"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [

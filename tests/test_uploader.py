@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from urllib.error import URLError
 
 from sius_ingest.ingest import IngestionConfig, IngestionService
-from sius_ingest.outbox import SQLiteEventStore
+from sius_ingest.outbox import REMOTE_RAW_EVENTS, SQLiteEventStore
 from sius_ingest.uploader import (
     SupabaseConfig,
     SupabaseUploader,
@@ -29,6 +29,51 @@ class FakeResponse:
 
 
 class SupabaseUploaderTests(unittest.TestCase):
+    def test_raw_only_uploader_leaves_projection_jobs_untouched(self) -> None:
+        requests = []
+
+        def open_request(request, *, timeout):
+            requests.append((request, timeout))
+            return FakeResponse()
+
+        with TemporaryDirectory() as temporary:
+            database = Path(temporary) / "sius.sqlite3"
+            with SQLiteEventStore(database) as store:
+                service = IngestionService(
+                    store=store,
+                    config=IngestionConfig(range_id="range-a"),
+                )
+                service.process(
+                    framed_record(
+                        shot_line(
+                            event_sequence=1,
+                            shot_flags=7,
+                            score_tenths=94,
+                            shot_number=1,
+                            annual_ticks=1001,
+                        ),
+                        sequence=1,
+                    )
+                )
+                uploader = SupabaseUploader(
+                    store=store,
+                    config=SupabaseConfig(
+                        url="https://example.supabase.co",
+                        api_key="sb_secret_test",
+                    ),
+                    topics=(REMOTE_RAW_EVENTS,),
+                    http_open=open_request,
+                )
+
+                summary = uploader.upload_once()
+                status = store.status()
+
+        self.assertEqual(summary.uploaded, 1)
+        self.assertEqual(len(requests), 1)
+        self.assertIn("/sius_raw_events?", requests[0][0].full_url)
+        self.assertEqual(status.pending_raw_uploads, 0)
+        self.assertEqual(status.pending_projection_uploads, 3)
+
     def test_uploads_dependency_order_and_marks_outbox_complete(self) -> None:
         requests = []
 
@@ -86,6 +131,7 @@ class SupabaseUploaderTests(unittest.TestCase):
         self.assertEqual(raw_payload["event_sequence"], 1)
         self.assertEqual(raw_payload["device_time_text"], "17:00:01.00")
         self.assertEqual(raw_payload["annual_ticks"], 1001)
+        self.assertEqual(len(raw_payload["stable_event_key"]), 64)
         self.assertEqual(raw_payload["fields"][0], "_SHOT")
         self.assertEqual(len(raw_payload["fields"]), 24)
         self.assertTrue(raw_payload["raw_text"].startswith("_SHOT;5;6;123;"))

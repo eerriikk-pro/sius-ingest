@@ -248,3 +248,16 @@ class StoreStatus:
     phases: int
     pending_uploads: int
     failed_uploads: int
+    pending_raw_uploads: int
+    failed_raw_uploads: int
+    pending_projection_uploads: int
+    failed_projection_uploads: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionCursor:
+    """Durable position in the append-only Supabase raw-event stream."""
+
+    last_ingest_id: int
+    processed_events: int
+    normalizer_version: str

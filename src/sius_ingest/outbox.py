@@ -17,6 +17,7 @@ from sius_ingest.models import (
     LaneState,
     OutboxItem,
     ParsedMessage,
+    ProjectionCursor,
     ShotAssignment,
     ShotKind,
     ShotMessage,
@@ -26,7 +27,7 @@ from sius_ingest.parser import message_to_dict
 from sius_ingest.sessionizer import RelaySessionizer
 from sius_ingest.time_utils import isoformat_utc, parse_utc, utc_now
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 REMOTE_RAW_EVENTS = "sius_raw_events"
 REMOTE_SESSIONS = "sius_sessions"
@@ -67,6 +68,9 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
         parser_version: str,
         range_id: str,
         sessionizer: RelaySessionizer,
+        project_locally: bool = True,
+        enqueue_raw_upload: bool = True,
+        source_event_key: str | None = None,
     ) -> IngestResult:
         raw_with_delimiter = record.raw + record.delimiter
         raw_hash = sha256(raw_with_delimiter).hexdigest()
@@ -78,6 +82,7 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
             message_type=message_type,
             raw_hash=raw_hash,
         )
+        remote_event_key = source_event_key or observation_key
         parsed_payload = message_to_dict(message) if message else None
         lane_number = _lane_number(message)
         shooter_number = _shooter_number(message)
@@ -122,7 +127,8 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
                     parse_error,
                 ),
             )
-            if cursor.rowcount == 0:
+            observation_inserted = cursor.rowcount != 0
+            if not observation_inserted and not project_locally:
                 return _result(
                     observation_inserted=False,
                     message_type=message_type,
@@ -131,48 +137,58 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
                     shooter_number=shooter_number,
                 )
 
-            raw_event_id = int(cursor.lastrowid)
-            self._enqueue(
-                cursor,
-                topic=REMOTE_RAW_EVENTS,
-                dedupe_key=stable_event_key,
-                payload={
-                    "event_key": stable_event_key,
-                    "range_id": range_id,
-                    "connection_id": str(record.connection_id),
-                    "record_sequence": record.sequence,
-                    "firing_point_index": _message_attribute(
-                        message,
-                        "firing_point_index",
-                    ),
-                    "lane_number": lane_number,
-                    "shooter_number": shooter_number,
-                    "event_type": message_type,
-                    "event_sequence": _message_attribute(message, "event_sequence"),
-                    "device_time_text": _message_attribute(
-                        message,
-                        "device_time_text",
-                    ),
-                    "annual_ticks": _message_attribute(message, "annual_ticks"),
-                    "received_at": isoformat_utc(record.completed_at),
-                    "raw_text": raw_text,
-                    "fields": fields,
-                    "raw_base64": b64encode(record.raw).decode("ascii"),
-                    "delimiter_base64": b64encode(record.delimiter).decode("ascii"),
-                    "raw_size_bytes": len(record.raw),
-                    "raw_sha256": raw_hash,
-                    "complete": record.complete,
-                    "partial_reason": record.partial_reason,
-                    "parser_version": parser_version,
-                    "parsed": parsed_payload,
-                    "parse_error": parse_error,
-                },
-                coalesce=False,
-            )
+            if observation_inserted:
+                raw_event_id = int(cursor.lastrowid)
+                if enqueue_raw_upload:
+                    self._enqueue(
+                        cursor,
+                        topic=REMOTE_RAW_EVENTS,
+                        dedupe_key=remote_event_key,
+                        payload={
+                            "event_key": remote_event_key,
+                            "stable_event_key": stable_event_key,
+                            "range_id": range_id,
+                            "connection_id": str(record.connection_id),
+                            "record_sequence": record.sequence,
+                            "firing_point_index": _message_attribute(
+                                message,
+                                "firing_point_index",
+                            ),
+                            "lane_number": lane_number,
+                            "shooter_number": shooter_number,
+                            "event_type": message_type,
+                            "event_sequence": _message_attribute(message, "event_sequence"),
+                            "device_time_text": _message_attribute(
+                                message,
+                                "device_time_text",
+                            ),
+                            "annual_ticks": _message_attribute(message, "annual_ticks"),
+                            "received_at": isoformat_utc(record.completed_at),
+                            "raw_text": raw_text,
+                            "fields": fields,
+                            "raw_base64": b64encode(record.raw).decode("ascii"),
+                            "delimiter_base64": b64encode(record.delimiter).decode("ascii"),
+                            "raw_size_bytes": len(record.raw),
+                            "raw_sha256": raw_hash,
+                            "complete": record.complete,
+                            "partial_reason": record.partial_reason,
+                            "parser_version": parser_version,
+                            "parsed": parsed_payload,
+                            "parse_error": parse_error,
+                        },
+                        coalesce=False,
+                    )
+            else:
+                row = cursor.execute(
+                    "SELECT id FROM raw_events WHERE observation_key = ?",
+                    (observation_key,),
+                ).fetchone()
+                assert row is not None
+                raw_event_id = int(row["id"])
 
             if not isinstance(message, ShotMessage):
                 return _result(
-                    observation_inserted=True,
+                    observation_inserted=observation_inserted,
                     message_type=message_type,
                     parse_error=parse_error,
                     lane_number=lane_number,
@@ -180,13 +196,26 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
                 )
 
             shot_key = _shot_key(range_id, message, raw_hash)
+            if not project_locally:
+                return _result(
+                    observation_inserted=observation_inserted,
+                    message_type=message_type,
+                    parse_error=parse_error,
+                    shot_key=shot_key,
+                    lane_number=message.lane_number,
+                    shooter_number=message.shooter_number,
+                    shot_kind=message.shot_kind,
+                    shot_number=message.shot_number,
+                    score_tenths=message.score_tenths,
+                )
+
             existing_shot = cursor.execute(
                 "SELECT 1 FROM shots WHERE shot_key = ?",
                 (shot_key,),
             ).fetchone()
             if existing_shot:
                 return _result(
-                    observation_inserted=True,
+                    observation_inserted=observation_inserted,
                     message_type=message_type,
                     parse_error=parse_error,
                     shot_duplicate=True,
@@ -215,7 +244,7 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
                 range_id=range_id,
                 record=record,
                 raw_event_id=raw_event_id,
-                raw_event_key=stable_event_key,
+                raw_event_key=remote_event_key,
                 shot=message,
                 shot_key=shot_key,
                 parsed_payload=parsed_payload,
@@ -225,7 +254,7 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
             )
 
             return _result(
-                observation_inserted=True,
+                observation_inserted=observation_inserted,
                 message_type=message_type,
                 parse_error=parse_error,
                 shot_inserted=True,
@@ -239,18 +268,31 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
                 phase_id=assignment.phase_id,
             )
 
-    def pending_outbox(self, *, limit: int) -> list[OutboxItem]:
+    def pending_outbox(
+        self,
+        *,
+        limit: int,
+        topics: Sequence[str] | None = None,
+    ) -> list[OutboxItem]:
         now = isoformat_utc(utc_now())
+        topic_filter = ""
+        parameters: list[object] = [now]
+        if topics:
+            placeholders = ",".join("?" for _ in topics)
+            topic_filter = f" AND topic IN ({placeholders})"
+            parameters.extend(topics)
+        parameters.append(limit)
         rows = self._connection.execute(
-            """
+            f"""
             SELECT id, topic, dedupe_key, payload_json, revision, attempt_count
             FROM outbox
             WHERE uploaded_at IS NULL
               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+              {topic_filter}
             ORDER BY id
             LIMIT ?
             """,
-            (now, limit),
+            parameters,
         ).fetchall()
         return [
             OutboxItem(
@@ -314,26 +356,105 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
             assert row is not None
             return int(row["count"])
 
-        pending = self._connection.execute(
-            "SELECT COUNT(*) AS count FROM outbox WHERE uploaded_at IS NULL"
-        ).fetchone()
-        failed = self._connection.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM outbox
-            WHERE uploaded_at IS NULL AND last_error IS NOT NULL
-            """
-        ).fetchone()
-        assert pending is not None
-        assert failed is not None
+        pending = self.pending_upload_count()
+        failed = self.failed_upload_count()
+        pending_raw = self.pending_upload_count((REMOTE_RAW_EVENTS,))
+        failed_raw = self.failed_upload_count((REMOTE_RAW_EVENTS,))
+        projection_topics = (REMOTE_SESSIONS, REMOTE_PHASES, REMOTE_SHOTS)
         return StoreStatus(
             raw_events=count("raw_events"),
             shots=count("shots"),
             sessions=count("sessions"),
             phases=count("phases"),
-            pending_uploads=int(pending["count"]),
-            failed_uploads=int(failed["count"]),
+            pending_uploads=pending,
+            failed_uploads=failed,
+            pending_raw_uploads=pending_raw,
+            failed_raw_uploads=failed_raw,
+            pending_projection_uploads=self.pending_upload_count(projection_topics),
+            failed_projection_uploads=self.failed_upload_count(projection_topics),
         )
+
+    def pending_upload_count(self, topics: Sequence[str] | None = None) -> int:
+        return self._outbox_count(topics=topics, failed_only=False)
+
+    def failed_upload_count(self, topics: Sequence[str] | None = None) -> int:
+        return self._outbox_count(topics=topics, failed_only=True)
+
+    def projection_cursor(self, name: str) -> ProjectionCursor | None:
+        row = self._connection.execute(
+            """
+            SELECT last_ingest_id, processed_events, normalizer_version
+            FROM projection_cursors
+            WHERE name = ?
+            """,
+            (name,),
+        ).fetchone()
+        if row is None:
+            return None
+        return ProjectionCursor(
+            last_ingest_id=int(row["last_ingest_id"]),
+            processed_events=int(row["processed_events"]),
+            normalizer_version=str(row["normalizer_version"]),
+        )
+
+    def save_projection_cursor(
+        self,
+        *,
+        name: str,
+        last_ingest_id: int,
+        processed_events: int,
+        normalizer_version: str,
+    ) -> None:
+        if last_ingest_id < 0:
+            raise ValueError("last_ingest_id must not be negative")
+        if processed_events < 0:
+            raise ValueError("processed_events must not be negative")
+        now = isoformat_utc(utc_now())
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO projection_cursors (
+                    name,
+                    last_ingest_id,
+                    processed_events,
+                    normalizer_version,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (name) DO UPDATE SET
+                    last_ingest_id = excluded.last_ingest_id,
+                    processed_events = excluded.processed_events,
+                    normalizer_version = excluded.normalizer_version,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    name,
+                    last_ingest_id,
+                    processed_events,
+                    normalizer_version,
+                    now,
+                ),
+            )
+
+    def _outbox_count(
+        self,
+        *,
+        topics: Sequence[str] | None,
+        failed_only: bool,
+    ) -> int:
+        clauses = ["uploaded_at IS NULL"]
+        parameters: list[object] = []
+        if failed_only:
+            clauses.append("last_error IS NOT NULL")
+        if topics:
+            placeholders = ",".join("?" for _ in topics)
+            clauses.append(f"topic IN ({placeholders})")
+            parameters.extend(topics)
+        row = self._connection.execute(
+            f"SELECT COUNT(*) AS count FROM outbox WHERE {' AND '.join(clauses)}",
+            parameters,
+        ).fetchone()
+        assert row is not None
+        return int(row["count"])
 
     def _apply_assignment(
         self,
@@ -752,7 +873,10 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
             return
 
         with self._connection:
-            self._connection.executescript(_SCHEMA_V1)
+            if version < 1:
+                self._connection.executescript(_SCHEMA_V1)
+            if version < 2:
+                self._connection.executescript(_SCHEMA_V2)
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
@@ -1012,4 +1136,14 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 CREATE INDEX IF NOT EXISTS outbox_pending_idx
     ON outbox (uploaded_at, next_attempt_at, id);
+"""
+
+_SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS projection_cursors (
+    name TEXT PRIMARY KEY,
+    last_ingest_id INTEGER NOT NULL,
+    processed_events INTEGER NOT NULL,
+    normalizer_version TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """

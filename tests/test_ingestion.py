@@ -10,6 +10,42 @@ from tests.helpers import framed_record, shot_line
 
 
 class IngestionServiceTests(unittest.TestCase):
+    def test_raw_only_mode_does_not_build_or_queue_projections(self) -> None:
+        with TemporaryDirectory() as temporary:
+            database = Path(temporary) / "sius.sqlite3"
+            with SQLiteEventStore(database) as store:
+                service = IngestionService(
+                    store=store,
+                    config=IngestionConfig(
+                        range_id="range-a",
+                        project_locally=False,
+                        enqueue_raw_upload=True,
+                    ),
+                )
+                result = service.process(
+                    framed_record(
+                        shot_line(
+                            event_sequence=1,
+                            shot_flags=7,
+                            score_tenths=94,
+                            shot_number=1,
+                            annual_ticks=1001,
+                        ),
+                        sequence=1,
+                    )
+                )
+                status = store.status()
+
+        self.assertTrue(result.observation_inserted)
+        self.assertFalse(result.shot_inserted)
+        self.assertEqual(result.score_tenths, 94)
+        self.assertEqual(status.raw_events, 1)
+        self.assertEqual(status.shots, 0)
+        self.assertEqual(status.sessions, 0)
+        self.assertEqual(status.phases, 0)
+        self.assertEqual(status.pending_raw_uploads, 1)
+        self.assertEqual(status.pending_projection_uploads, 0)
+
     def test_persists_deduplicates_and_segments_controlled_sequence(self) -> None:
         with TemporaryDirectory() as temporary:
             database = Path(temporary) / "sius.sqlite3"
@@ -91,7 +127,7 @@ class IngestionServiceTests(unittest.TestCase):
             self.assertEqual(status.shots, 5)
             self.assertEqual(status.sessions, 1)
             self.assertEqual(status.phases, 4)
-            self.assertEqual(status.pending_uploads, 15)
+            self.assertEqual(status.pending_uploads, 16)
 
             connection = sqlite3.connect(database)
             connection.row_factory = sqlite3.Row

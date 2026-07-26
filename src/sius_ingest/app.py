@@ -11,21 +11,29 @@ from pathlib import Path
 from threading import Event, Thread
 
 from sius_ingest.ingest import IngestionConfig, IngestionService
-from sius_ingest.models import FramedRecord, IngestResult, SessionizerConfig, StoreStatus
-from sius_ingest.outbox import SQLiteEventStore
+from sius_ingest.models import FramedRecord, IngestResult, StoreStatus
+from sius_ingest.normalizer import (
+    PROJECTION_TOPICS,
+    NormalizationError,
+    SupabaseNormalizer,
+)
+from sius_ingest.outbox import REMOTE_RAW_EVENTS, SQLiteEventStore
+from sius_ingest.remote_source import RemoteSourceError, SupabaseRawEventSource
 from sius_ingest.replay_source import ReplaySource
 from sius_ingest.runner import LiveRunnerConfig, run_live_stream
-from sius_ingest.sessionizer import RelaySessionizer
 from sius_ingest.uploader import SupabaseConfig, SupabaseUploader
 
-DEFAULT_DATABASE = Path(os.getenv("SIUS_DATABASE", "data/sius.sqlite3"))
+DEFAULT_DATABASE = Path(os.getenv("SIUS_DATABASE", "data/sius-raw.sqlite3"))
+DEFAULT_NORMALIZER_DATABASE = Path(
+    os.getenv("SIUS_NORMALIZER_DATABASE", "data/sius-normalizer.sqlite3")
+)
 DEFAULT_RANGE_ID = os.getenv("SIUS_RANGE_ID", "default-range")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sius-ingest",
-        description="Capture, parse, segment, persist, replay, and upload SIUSData records.",
+        description="Capture raw SIUSData records and build replayable Supabase projections.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -65,6 +73,27 @@ def build_parser() -> argparse.ArgumentParser:
     upload.add_argument("--watch", action="store_true")
     upload.set_defaults(handler=_run_upload)
 
+    normalize = subparsers.add_parser(
+        "normalize",
+        help="build sessions, phases, and shots from Supabase raw events",
+    )
+    normalize.add_argument(
+        "--database",
+        type=Path,
+        default=DEFAULT_NORMALIZER_DATABASE,
+        help="durable worker state (default: data/sius-normalizer.sqlite3)",
+    )
+    normalize.add_argument("--projection-name", default="default")
+    normalize.add_argument("--page-size", type=int, default=500)
+    normalize.add_argument("--watch", action="store_true")
+    normalize.add_argument(
+        "--session-timeout-minutes",
+        type=float,
+        default=240.0,
+    )
+    _add_supabase_arguments(normalize, combined=False)
+    normalize.set_defaults(handler=_run_normalize)
+
     return parser
 
 
@@ -81,7 +110,7 @@ def _effective_argv(argv: Sequence[str] | None) -> list[str]:
 
 
 def _run_combined(args: argparse.Namespace) -> int:
-    """Run live ingestion with an optional background Supabase uploader."""
+    """Run raw capture with an optional background Supabase uploader."""
 
     secret_key = _resolve_secret_key(args)
     missing_settings = [
@@ -131,14 +160,14 @@ def _run_combined(args: argparse.Namespace) -> int:
 
 
 def _run_live(args: argparse.Namespace) -> int:
-    sessionizer = RelaySessionizer(
-        SessionizerConfig(session_timeout=timedelta(minutes=args.session_timeout_minutes))
-    )
     with SQLiteEventStore(args.database) as store:
         service = IngestionService(
             store=store,
-            config=IngestionConfig(range_id=args.range_id),
-            sessionizer=sessionizer,
+            config=IngestionConfig(
+                range_id=args.range_id,
+                project_locally=False,
+                enqueue_raw_upload=True,
+            ),
         )
 
         def ingest_record(record: FramedRecord) -> str | None:
@@ -162,26 +191,24 @@ def _run_live(args: argparse.Namespace) -> int:
 
 
 def _run_replay(args: argparse.Namespace) -> int:
-    sessionizer = RelaySessionizer(
-        SessionizerConfig(session_timeout=timedelta(minutes=args.session_timeout_minutes))
-    )
     processed = 0
-    shots = 0
-    duplicates = 0
+    shot_records = 0
     parse_errors = 0
 
     with SQLiteEventStore(args.database) as store:
         service = IngestionService(
             store=store,
-            config=IngestionConfig(range_id=args.range_id),
-            sessionizer=sessionizer,
+            config=IngestionConfig(
+                range_id=args.range_id,
+                project_locally=False,
+                enqueue_raw_upload=True,
+            ),
         )
         source = ReplaySource(args.capture, verify_hashes=not args.no_verify_hashes)
         for record in source.records():
             result = service.process(record)
             processed += 1
-            shots += int(result.shot_inserted)
-            duplicates += int(result.shot_duplicate)
+            shot_records += int(result.shot_kind is not None)
             parse_errors += int(result.parse_error is not None)
             if not args.quiet:
                 summary = _format_ingest_result(result)
@@ -189,8 +216,8 @@ def _run_replay(args: argparse.Namespace) -> int:
                     print(summary)
 
         print(
-            f"Replay complete: records={processed} shots={shots} "
-            f"duplicate_shots={duplicates} parse_errors={parse_errors}"
+            f"Replay complete: records={processed} shot_records={shot_records} "
+            f"parse_errors={parse_errors}"
         )
         _print_status(store.status())
     return 0
@@ -209,6 +236,10 @@ def _run_status(args: argparse.Namespace) -> int:
                     "phases": status.phases,
                     "pending_uploads": status.pending_uploads,
                     "failed_uploads": status.failed_uploads,
+                    "pending_raw_uploads": status.pending_raw_uploads,
+                    "failed_raw_uploads": status.failed_raw_uploads,
+                    "pending_projection_uploads": status.pending_projection_uploads,
+                    "failed_projection_uploads": status.failed_projection_uploads,
                 },
                 indent=2,
             )
@@ -239,7 +270,77 @@ def _run_upload(args: argparse.Namespace) -> int:
         interval=args.interval,
         watch=args.watch,
         stop_event=stop_event,
+        topics=(REMOTE_RAW_EVENTS,),
     )
+
+
+def _run_normalize(args: argparse.Namespace) -> int:
+    if not args.url:
+        raise SystemExit("SUPABASE_URL is required (or pass --url)")
+    secret_key = _resolve_secret_key(args)
+    if not secret_key:
+        raise SystemExit("A Supabase secret key is required")
+    if args.interval <= 0:
+        raise SystemExit("--interval must be positive")
+    if args.session_timeout_minutes <= 0:
+        raise SystemExit("--session-timeout-minutes must be positive")
+
+    config = SupabaseConfig(
+        url=args.url,
+        api_key=secret_key,
+        timeout=args.timeout,
+    )
+    with SQLiteEventStore(args.database) as store:
+        source = SupabaseRawEventSource(config=config)
+        uploader = SupabaseUploader(
+            store=store,
+            config=config,
+            topics=PROJECTION_TOPICS,
+        )
+        normalizer = SupabaseNormalizer(
+            store=store,
+            source=source,
+            uploader=uploader,
+            projection_name=args.projection_name,
+            page_size=args.page_size,
+            upload_batch_size=args.batch_size,
+            session_timeout=timedelta(minutes=args.session_timeout_minutes),
+        )
+
+        print(
+            f"Normalizer database: {args.database.resolve()}",
+            flush=True,
+        )
+        print(
+            f"Reading raw events from {args.url}; "
+            f"{'watching continuously' if args.watch else 'running one catch-up pass'}.",
+            flush=True,
+        )
+        try:
+            while True:
+                try:
+                    summary = normalizer.normalize_available()
+                except (NormalizationError, RemoteSourceError) as exc:
+                    print(f"normalizer error: {exc}", flush=True)
+                    if not args.watch:
+                        return 1
+                else:
+                    if summary.fetched_events or not args.watch:
+                        print(
+                            f"normalized events={summary.fetched_events} "
+                            f"shots={summary.parsed_shots} "
+                            f"parse_errors={summary.parse_errors} "
+                            f"uploaded={summary.uploaded_rows} "
+                            f"cursor={summary.last_ingest_id}",
+                            flush=True,
+                        )
+                    if not args.watch:
+                        return 0
+
+                Event().wait(args.interval)
+        except KeyboardInterrupt:
+            print("\nNormalizer stopped.", flush=True)
+            return 0
 
 
 def _run_background_uploader(
@@ -257,6 +358,7 @@ def _run_background_uploader(
             interval=args.upload_interval,
             watch=True,
             stop_event=stop_event,
+            topics=(REMOTE_RAW_EVENTS,),
         )
     except Exception as exc:
         print(
@@ -276,6 +378,7 @@ def _upload_loop(
     interval: float,
     watch: bool,
     stop_event: Event,
+    topics: tuple[str, ...],
 ) -> int:
     with SQLiteEventStore(database) as store:
         uploader = SupabaseUploader(
@@ -285,6 +388,7 @@ def _upload_loop(
                 api_key=secret_key,
                 timeout=timeout,
             ),
+            topics=topics,
         )
         while not stop_event.is_set():
             summary = uploader.upload_once(limit=batch_size)
@@ -318,12 +422,6 @@ def _resolve_secret_key(args: argparse.Namespace) -> str | None:
 def _add_ingestion_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     parser.add_argument("--range-id", default=DEFAULT_RANGE_ID)
-    parser.add_argument(
-        "--session-timeout-minutes",
-        type=float,
-        default=240.0,
-        help="start a new athlete lane session after this idle period",
-    )
 
 
 def _add_live_arguments(parser: argparse.ArgumentParser) -> None:
@@ -378,13 +476,14 @@ def _format_ingest_result(result: IngestResult) -> str | None:
             f"duplicate shot ignored lane={result.lane_number} "
             f"kind={result.shot_kind} number={result.shot_number}"
         )
-    if not result.shot_inserted:
+    if result.shot_kind is None:
         return None
 
     assert result.score_tenths is not None
     shooter = result.shooter_number or "anonymous"
+    action = "shot" if result.shot_inserted else "captured shot"
     return (
-        f"shot lane={result.lane_number} shooter={shooter} "
+        f"{action} lane={result.lane_number} shooter={shooter} "
         f"kind={result.shot_kind} number={result.shot_number} "
         f"score={result.score_tenths / 10:.1f}"
     )
@@ -395,8 +494,10 @@ def _print_status(status: StoreStatus) -> None:
         "database "
         f"raw_events={status.raw_events} shots={status.shots} "
         f"sessions={status.sessions} phases={status.phases} "
-        f"pending_uploads={status.pending_uploads} "
-        f"failed_uploads={status.failed_uploads}"
+        f"raw_uploads_pending={status.pending_raw_uploads} "
+        f"raw_uploads_failed={status.failed_raw_uploads} "
+        f"projection_uploads_pending={status.pending_projection_uploads} "
+        f"projection_uploads_failed={status.failed_projection_uploads}"
     )
 
 

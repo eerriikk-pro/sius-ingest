@@ -32,6 +32,7 @@ jobs:
         run: |
           ./dist/sius-ingest.exe --help
           ./dist/sius-ingest.exe run --help
+          ./dist/sius-ingest.exe normalize --help
           ./dist/sius-ingest.exe status `
             --database "${{ runner.temp }}\sius-ingest-smoke.sqlite3" `
             --json

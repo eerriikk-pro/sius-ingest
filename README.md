@@ -1,31 +1,30 @@
 # sius-ingest
 
-`sius-ingest` captures the TCP stream exposed by SIUSData, preserves the
-original bytes, parses the observed practice-shot format, groups shots into
-sighter blocks and match relays, and stores everything in a durable local
-SQLite database. An optional uploader synchronizes the local outbox to
-Supabase/Postgres.
+`sius-ingest` captures the TCP stream exposed by SIUSData and forwards every
+unique raw record to Supabase through a durable local SQLite outbox. A separate
+normalizer can run on any other computer to build athlete sessions, sighter
+blocks, match relays, and canonical shots from those immutable raw events.
 
-The collector is intended to run beside SIUSData on the range Windows PC, but
-the same commands work on macOS for development and capture replay. It uses
-only the Python standard library at runtime.
+The range Windows PC is only the SIUS-to-Supabase bridge. Parsing and projection
+work can run on macOS, Linux, or Windows and can stop temporarily without losing
+data. Both programs use only the Python standard library at runtime.
 
 ## Current behavior
 
 - reconnects to SIUSData automatically;
-- starts live collection and background upload together when double-clicked;
+- starts raw collection and background upload together when double-clicked;
 - writes a lossless capture for future protocol analysis;
 - retains every received record locally, including unknown and malformed ones;
-- parses the `_SHOT` and `_SHID` shapes observed at this range;
-- associates shots with the firing number carried by `_SHOT`;
-- distinguishes sighters from match shots;
+- preserves SIUSData connection backlogs as raw observations while deduplicating
+  their canonical shots;
+- uploads only `sius_raw_events` from the range PC;
+- keeps upload retry state in SQLite across restarts and internet outages;
+- lets an external normalizer parse `_SHOT` and `_SHID` records;
+- groups normalized shots by firing number, lane, sighter block, and match relay;
 - starts a new relay on a sighter/match transition or reset shot counter;
-- does not assume a relay contains exactly 60 shots;
-- deduplicates SIUSData's connection backlog and replayed captures;
-- commits each shot, relay update, and upload job in one SQLite transaction;
-- uploads idempotently to Supabase with retry state kept in SQLite.
-- uploads outbox rows from older collector versions without mixing incompatible
-  PostgREST bulk payload shapes.
+- never assumes that a relay contains exactly 60 shots;
+- checkpoints normalization only after its Supabase writes succeed;
+- makes all normalized tables reproducible from raw events.
 
 See [docs/protocol-observations.md](docs/protocol-observations.md) for the
 evidence and explicit assumptions behind the parser.
@@ -77,11 +76,11 @@ that runs the resulting executable. The executable is not currently
 code-signed, so Windows may identify its publisher as unknown.
 
 Place `sius-ingest.exe` in a permanent folder on the range PC. With SIUSData
-running, double-click the executable to begin live collection using the
-defaults. If `SUPABASE_URL` and `SUPABASE_SECRET_KEY` are saved in the Windows
-environment, the same process also uploads continuously. No launcher script or
-second console is needed. The console window remains open and shows connection,
-shot, and upload activity; press `Control-C` to stop cleanly.
+running, double-click the executable to begin raw collection using the defaults.
+If `SUPABASE_URL` and `SUPABASE_SECRET_KEY` are saved in the Windows environment,
+the same process continuously forwards raw events. It does not build or upload
+shots, sessions, or relays. The console remains open and shows connection,
+capture, and upload activity; press `Control-C` to stop cleanly.
 
 The equivalent explicit PowerShell command is:
 
@@ -90,12 +89,12 @@ The equivalent explicit PowerShell command is:
   --host 127.0.0.1 `
   --port 4000 `
   --range-id my-range `
-  --database data\sius.sqlite3
+  --database data\sius-raw.sqlite3
 ```
 
 Launching without arguments is equivalent to `run`. It uses
 `127.0.0.1:4000`, range ID `default-range`, SQLite database
-`data\sius.sqlite3`, and capture directory `captures\`. If either Supabase
+`data\sius-raw.sqlite3`, and capture directory `captures\`. If either Supabase
 setting is missing, it clearly reports that upload is disabled and continues
 collecting locally.
 
@@ -112,29 +111,30 @@ Developers can create the same executable from a Windows checkout:
 .\scripts\build_windows.ps1
 ```
 
-## Collect and store live data
+## Run the range-PC raw bridge
 
 On the SIUSData Windows PC:
 
 ```powershell
-sius-ingest live `
+sius-ingest run `
   --host 127.0.0.1 `
   --port 4000 `
   --range-id my-range `
-  --database data\sius.sqlite3
+  --database data\sius-raw.sqlite3
 ```
 
 For the currently tested Mac-to-PC connection:
 
 ```bash
-sius-ingest live \
+sius-ingest run \
   --host 192.168.1.101 \
   --port 4000 \
   --range-id my-range \
-  --database data/sius.sqlite3
+  --database data/sius-raw.sqlite3
 ```
 
-The command prints one summary per accepted shot. It also creates a timestamped
+The command prints one summary per captured shot while retaining every message
+type. It also creates a timestamped
 directory under `captures/` with:
 
 - `payload.bin` — all received payload bytes in arrival order;
@@ -153,7 +153,7 @@ To print every raw record as well as shot summaries, add
 sius-capture --host 192.168.1.101 --port 4000
 ```
 
-## Replay a capture
+## Replay a capture into the raw outbox
 
 Captured data can be parsed again without SIUSData:
 
@@ -161,30 +161,35 @@ Captured data can be parsed again without SIUSData:
 sius-ingest replay \
   captures/sius-20260725T000127Z \
   --range-id my-range \
-  --database data/sius.sqlite3
+  --database data/sius-raw.sqlite3
 ```
 
-Replay verifies the hash of each captured record by default. Replaying the
-same capture, or receiving the same backlog after reconnecting, does not create
-duplicate canonical shots.
+Replay verifies the hash of each captured record by default. Use `upload` after
+replay to forward its raw events. Replaying the same capture with its original
+connection and sequence metadata is idempotent. A newly observed reconnect
+backlog is retained as new raw observations but does not duplicate canonical
+shots.
 
 ## Inspect local status
 
 ```bash
-sius-ingest status --database data/sius.sqlite3
-sius-ingest status --database data/sius.sqlite3 --json
+sius-ingest status --database data/sius-raw.sqlite3
+sius-ingest status --database data/sius-raw.sqlite3 --json
 ```
 
-The result includes raw-event, shot, session, relay, pending-upload, and
-failed-upload counts.
+The range-PC result should show raw events and raw upload counts. Projection
+counts belong to the normalizer's separate SQLite database.
 
 ## Configure Supabase
 
 1. Create a Supabase project.
 2. Run [supabase/schema.sql](supabase/schema.sql) in the SQL editor.
-3. Copy the project URL from the project's **Connect** dialog.
-4. In **Settings > API Keys**, create a server-side secret key.
-5. Supply `SUPABASE_URL` and `SUPABASE_SECRET_KEY` to the uploader process.
+3. For the clean v0.3 cutover from an experimental installation, run
+   [supabase/reset_experimental_data.sql](supabase/reset_experimental_data.sql)
+   once. It permanently removes the previous SIUS rows.
+4. Copy the project URL from the project's **Connect** dialog.
+5. In **Settings > API Keys**, create a server-side secret key.
+6. Supply `SUPABASE_URL` and `SUPABASE_SECRET_KEY` to both processes.
 
 The `sb_secret_...` key bypasses row-level security and grants elevated access.
 Never commit it or put it in a browser/mobile application. On a shared range
@@ -201,7 +206,7 @@ SUPABASE_SECRET_KEY=sb_secret_replace_me
 ```
 
 Restart any open consoles after saving them. From then on, double-clicking
-`sius-ingest.exe` starts both collection and upload automatically.
+`sius-ingest.exe` starts raw collection and forwarding automatically.
 
 On a shared PC, provide the URL on the command line and let the collector read
 the temporary key from a masked prompt:
@@ -212,38 +217,74 @@ the temporary key from a masked prompt:
   --prompt-secret-key
 ```
 
-For a trusted server, the equivalent environment configuration is:
-
-```bash
-export SUPABASE_URL=https://your-project.supabase.co
-export SUPABASE_SECRET_KEY=sb_secret_replace_me
-sius-ingest run
-```
-
-Collection does not depend on Supabase being reachable. Network or API
-failures remain in the SQLite outbox and are retried with backoff.
+Collection does not depend on Supabase being reachable. Network or API failures
+remain in the SQLite outbox and are retried with backoff.
 
 The standalone `live` and `upload --watch` commands remain available for
-diagnostics and split-process deployments.
+diagnostics and split-process deployments. `upload` sends raw events only.
+
+## Run the normalizer elsewhere
+
+Clone and install this repository on the Mac, server, or other computer that
+will build the normalized tables. Save the same two Supabase variables, then
+run:
+
+```bash
+set -a
+source .env
+set +a
+sius-ingest normalize --watch
+```
+
+Alternatively, export `SUPABASE_URL` and `SUPABASE_SECRET_KEY` directly. The
+application never writes those credentials into SQLite.
+
+No manual SQLite setup is required. The worker creates
+`data/sius-normalizer.sqlite3` and stores its durable raw-event checkpoint,
+lane state, and projection outbox there. It reads `sius_raw_events` in
+server-assigned `ingest_id` order and writes:
+
+- `sius_sessions`;
+- `sius_phases`;
+- `sius_shots`.
+
+Stopping the normalizer is safe. On restart it drains any pending projection
+writes, resumes after the last committed raw event, and catches up. Run without
+`--watch` for one catch-up pass:
+
+```bash
+sius-ingest normalize
+```
+
+Use an always-on machine if normalized tables need to update continuously. The
+range-PC bridge continues preserving and forwarding raw data while the worker is
+offline.
+
+If the Supabase data is reset with `reset_experimental_data.sql`, also remove
+the normalizer's local `data/sius-normalizer.sqlite3` before starting it again.
+This is only necessary for an intentional destructive reset.
 
 ### Data retained remotely
 
-Supabase receives every unique SIUS record, not only shots. Each raw event
+Supabase receives every observed SIUS record, not only shots. Each raw event
 contains:
 
 - the complete original record as text and Base64 bytes;
 - every semicolon-delimited field in order;
 - original delimiter, byte length, and SHA-256 hash;
-- connection ID and record sequence;
+- connection ID, record sequence, and server-assigned ingestion order;
+- an observation key plus a stable content/event correlation key;
 - local receive timestamp and available SIUS time/counter fields;
 - firing point, lane, and shooter identifiers when present;
 - parser version, parsed payload, unknown fields, and parse errors.
 
-Normalized tables additionally retain athlete sessions, sighter/match phases,
-scores, raw score fields, shot flags, coordinates, and the full parsed `_SHOT`
-payload. Identical backlog retransmissions are deduplicated remotely; every
-arrival and exact TCP chunk remains available in local SQLite and the lossless
-capture directory.
+The external normalizer additionally retains athlete sessions, sighter/match
+phases, scores, raw score fields, shot flags, coordinates, and the full parsed
+`_SHOT` payload. These tables are projections: raw events remain the source of
+truth. Canonical shots from backlog retransmissions are deduplicated while the
+raw observations remain available for auditing. Every exact TCP chunk also
+remains available in the range PC's SQLite database and lossless capture
+directory.
 
 ## Configuration
 
@@ -254,7 +295,8 @@ Frequently used options have environment-variable equivalents:
 | `SIUS_HOST` | `127.0.0.1` | SIUSData host |
 | `SIUS_PORT` | `4000` | SIUSData TCP port |
 | `SIUS_OUTPUT` | `captures` | lossless capture parent directory |
-| `SIUS_DATABASE` | `data/sius.sqlite3` | local SQLite database |
+| `SIUS_DATABASE` | `data/sius-raw.sqlite3` | range-PC raw outbox |
+| `SIUS_NORMALIZER_DATABASE` | `data/sius-normalizer.sqlite3` | worker state |
 | `SIUS_RANGE_ID` | `default-range` | stable range identifier |
 | `SUPABASE_URL` | none | Supabase project URL |
 | `SUPABASE_SECRET_KEY` | none | private `sb_secret_...` uploader credential |
@@ -263,16 +305,23 @@ Run `sius-ingest COMMAND --help` for all command-specific options.
 
 ## Architecture
 
-The transport and storage layers are deliberately independent:
+Raw collection and derived projections are deliberately independent:
 
 ```text
-SIUSData TCP
-    -> lossless capture
-    -> newline framing
-    -> conservative parser
-    -> relay sessionizer
-    -> SQLite events + canonical shots + outbox
-    -> optional Supabase uploader
+Range PC
+    SIUSData TCP
+        -> lossless capture
+        -> newline framing
+        -> SQLite raw events + durable raw outbox
+        -> Supabase sius_raw_events
+
+External worker
+    Supabase sius_raw_events
+        -> monotonic checkpoint
+        -> conservative parser
+        -> relay sessionizer
+        -> SQLite projection outbox
+        -> Supabase sessions + phases + shots
 ```
 
 Key modules:
@@ -282,8 +331,11 @@ Key modules:
 - `sessionizer.py` — deterministic lane/session/relay transitions;
 - `outbox.py` — SQLite schema, transactions, deduplication, and outbox;
 - `replay_source.py` — verified replay of previous captures;
-- `uploader.py` — ordered, idempotent Supabase PostgREST uploads;
-- `app.py` — operational `live`, `replay`, `status`, and `upload` commands.
+- `remote_source.py` — ordered raw-event reads from Supabase;
+- `normalizer.py` — checkpointed, replayable projection worker;
+- `uploader.py` — scoped, idempotent Supabase PostgREST uploads;
+- `app.py` — operational `run`, `replay`, `status`, `upload`, and `normalize`
+  commands.
 
 Unknown fields keep `*_raw` names, and every parsed record retains its complete
 field list. Improving the parser therefore does not require recollecting old
