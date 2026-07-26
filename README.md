@@ -34,6 +34,7 @@ evidence and explicit assumptions behind the parser.
 - Python 3.11 or newer
 - SIUSData TCP access, normally `127.0.0.1:4000` on the range PC
 - optional Supabase project for remote storage
+- Node.js 22.13 or newer for the local practice viewer
 
 ## Install
 
@@ -264,6 +265,32 @@ If the Supabase data is reset with `reset_experimental_data.sql`, also remove
 the normalizer's local `data/sius-normalizer.sqlite3` before starting it again.
 This is only necessary for an intentional destructive reset.
 
+## Run the local practice viewer
+
+The proof-of-concept viewer lives in [`web/`](web/). It looks up a firing
+number, accepts a configurable 1–365 day window, and displays normalized shots
+using the stored session, sighter-block, and match-relay boundaries. Match
+relays are not split at an arbitrary 60 shots.
+
+The viewer reads the existing repository-level `.env` file. Its Next.js route
+handler queries Supabase on the server, so `SUPABASE_SECRET_KEY` is never sent
+to browser code.
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Open <http://127.0.0.1:3000>, enter a member ID, and choose the number of days
+to inspect. `SIUS_RANGE_ID` is optional; when present, the viewer limits results
+to that range. `SIUS_VIEWER_TIMEZONE` controls displayed dates and defaults to
+`America/Vancouver`.
+
+The target display uses the scale inferred from the controlled SIUS capture:
+native X/Y coordinates are multiplied by 1000 to plot millimetres. The raw
+native values remain unchanged in Supabase.
+
 ### Data retained remotely
 
 Supabase receives every observed SIUS record, not only shots. Each raw event
@@ -298,6 +325,7 @@ Frequently used options have environment-variable equivalents:
 | `SIUS_DATABASE` | `data/sius-raw.sqlite3` | range-PC raw outbox |
 | `SIUS_NORMALIZER_DATABASE` | `data/sius-normalizer.sqlite3` | worker state |
 | `SIUS_RANGE_ID` | `default-range` | stable range identifier |
+| `SIUS_VIEWER_TIMEZONE` | `America/Vancouver` | local viewer display timezone |
 | `SUPABASE_URL` | none | Supabase project URL |
 | `SUPABASE_SECRET_KEY` | none | private `sb_secret_...` uploader credential |
 
@@ -321,6 +349,11 @@ External worker
         -> conservative parser
         -> relay sessionizer
         -> SQLite projection outbox
+        -> Supabase sessions + phases + shots
+
+Local viewer
+    Browser
+        -> server-only viewer API
         -> Supabase sessions + phases + shots
 ```
 
@@ -354,3 +387,14 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 
 Tests use synthetic firing numbers and records. Real captures and athlete names
 must not be committed.
+
+Run the viewer checks separately:
+
+```bash
+cd web
+npm install
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
