@@ -5,8 +5,11 @@
 -- makes the external normalizer begin at ingest_id 1.
 
 truncate table
+    public.sius_projection_errors,
+    public.sius_projection_lane_state,
     public.sius_shots,
     public.sius_phases,
     public.sius_sessions,
+    public.sius_projection_state,
     public.sius_raw_events
 restart identity cascade;

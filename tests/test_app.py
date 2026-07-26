@@ -43,6 +43,14 @@ class EffectiveArgumentsTests(unittest.TestCase):
 
         self.assertEqual(args.secret_key, "sb_secret_current")
 
+    def test_normalizer_uses_remote_state_without_local_database_flags(self) -> None:
+        args = build_parser().parse_args(["normalize"])
+
+        self.assertEqual(args.projection_name, "default")
+        self.assertEqual(args.page_size, 500)
+        self.assertFalse(hasattr(args, "database"))
+        self.assertFalse(hasattr(args, "watch"))
+
     def test_secret_key_can_be_read_from_masked_prompt(self) -> None:
         args = Namespace(prompt_secret_key=True, secret_key=None)
         with patch("sius_ingest.app.getpass", return_value=" sb_secret_test "):

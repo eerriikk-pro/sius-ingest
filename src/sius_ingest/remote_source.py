@@ -24,7 +24,9 @@ class RemoteRawEvent:
 
     ingest_id: int
     event_key: str
+    stable_event_key: str
     range_id: str
+    event_type: str | None
     record: FramedRecord
 
 
@@ -58,8 +60,9 @@ class SupabaseRawEventSource:
         query = urlencode(
             {
                 "select": (
-                    "ingest_id,event_key,range_id,connection_id,record_sequence,"
-                    "received_at,raw_base64,delimiter_base64,complete,partial_reason"
+                    "ingest_id,event_key,stable_event_key,range_id,event_type,"
+                    "connection_id,record_sequence,received_at,raw_base64,"
+                    "delimiter_base64,complete,partial_reason"
                 ),
                 "ingest_id": f"gt.{last_ingest_id}",
                 "order": "ingest_id.asc",
@@ -114,7 +117,10 @@ def _decode_event(value: object) -> RemoteRawEvent:
     try:
         ingest_id = int(value["ingest_id"])
         event_key = _required_text(value, "event_key")
+        stable_event_key = _required_text(value, "stable_event_key")
         range_id = _required_text(value, "range_id")
+        event_type_value = value.get("event_type")
+        event_type = str(event_type_value) if event_type_value is not None else None
         received_at = parse_utc(_required_text(value, "received_at"))
         raw = b64decode(_required_text(value, "raw_base64"), validate=True)
         delimiter = b64decode(
@@ -137,7 +143,9 @@ def _decode_event(value: object) -> RemoteRawEvent:
     return RemoteRawEvent(
         ingest_id=ingest_id,
         event_key=event_key,
+        stable_event_key=stable_event_key,
         range_id=range_id,
+        event_type=event_type,
         record=FramedRecord(
             connection_id=connection_id,
             sequence=record_sequence,

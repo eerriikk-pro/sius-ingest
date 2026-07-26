@@ -12,21 +12,15 @@ from threading import Event, Thread
 
 from sius_ingest.ingest import IngestionConfig, IngestionService
 from sius_ingest.models import FramedRecord, IngestResult, StoreStatus
-from sius_ingest.normalizer import (
-    PROJECTION_TOPICS,
-    NormalizationError,
-    SupabaseNormalizer,
-)
+from sius_ingest.normalizer import NormalizationError, SupabaseNormalizer
 from sius_ingest.outbox import REMOTE_RAW_EVENTS, SQLiteEventStore
-from sius_ingest.remote_source import RemoteSourceError, SupabaseRawEventSource
+from sius_ingest.remote_projection import SupabaseProjectionRepository
+from sius_ingest.remote_source import SupabaseRawEventSource
 from sius_ingest.replay_source import ReplaySource
 from sius_ingest.runner import LiveRunnerConfig, run_live_stream
 from sius_ingest.uploader import SupabaseConfig, SupabaseUploader
 
 DEFAULT_DATABASE = Path(os.getenv("SIUS_DATABASE", "data/sius-raw.sqlite3"))
-DEFAULT_NORMALIZER_DATABASE = Path(
-    os.getenv("SIUS_NORMALIZER_DATABASE", "data/sius-normalizer.sqlite3")
-)
 DEFAULT_RANGE_ID = os.getenv("SIUS_RANGE_ID", "default-range")
 
 
@@ -77,21 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
         "normalize",
         help="build sessions, phases, and shots from Supabase raw events",
     )
-    normalize.add_argument(
-        "--database",
-        type=Path,
-        default=DEFAULT_NORMALIZER_DATABASE,
-        help="durable worker state (default: data/sius-normalizer.sqlite3)",
-    )
     normalize.add_argument("--projection-name", default="default")
     normalize.add_argument("--page-size", type=int, default=500)
-    normalize.add_argument("--watch", action="store_true")
     normalize.add_argument(
         "--session-timeout-minutes",
         type=float,
         default=240.0,
     )
-    _add_supabase_arguments(normalize, combined=False)
+    _add_supabase_arguments(normalize, combined=False, worker=True)
     normalize.set_defaults(handler=_run_normalize)
 
     return parser
@@ -280,67 +267,46 @@ def _run_normalize(args: argparse.Namespace) -> int:
     secret_key = _resolve_secret_key(args)
     if not secret_key:
         raise SystemExit("A Supabase secret key is required")
-    if args.interval <= 0:
-        raise SystemExit("--interval must be positive")
     if args.session_timeout_minutes <= 0:
         raise SystemExit("--session-timeout-minutes must be positive")
+    if not 1 <= args.page_size <= 1000:
+        raise SystemExit("--page-size must be between 1 and 1000")
 
     config = SupabaseConfig(
         url=args.url,
         api_key=secret_key,
         timeout=args.timeout,
     )
-    with SQLiteEventStore(args.database) as store:
-        source = SupabaseRawEventSource(config=config)
-        uploader = SupabaseUploader(
-            store=store,
-            config=config,
-            topics=PROJECTION_TOPICS,
-        )
-        normalizer = SupabaseNormalizer(
-            store=store,
-            source=source,
-            uploader=uploader,
-            projection_name=args.projection_name,
-            page_size=args.page_size,
-            upload_batch_size=args.batch_size,
-            session_timeout=timedelta(minutes=args.session_timeout_minutes),
-        )
+    normalizer = SupabaseNormalizer(
+        source=SupabaseRawEventSource(config=config),
+        repository=SupabaseProjectionRepository(config=config),
+        projection_name=args.projection_name,
+        page_size=args.page_size,
+        session_timeout=timedelta(minutes=args.session_timeout_minutes),
+    )
+    print(
+        f"Reading new raw events from {args.url}; projection={args.projection_name}.",
+        flush=True,
+    )
+    try:
+        summary = normalizer.normalize_available()
+    except NormalizationError as exc:
+        print(f"normalizer error: {exc}", flush=True)
+        return 1
 
-        print(
-            f"Normalizer database: {args.database.resolve()}",
-            flush=True,
-        )
-        print(
-            f"Reading raw events from {args.url}; "
-            f"{'watching continuously' if args.watch else 'running one catch-up pass'}.",
-            flush=True,
-        )
-        try:
-            while True:
-                try:
-                    summary = normalizer.normalize_available()
-                except (NormalizationError, RemoteSourceError) as exc:
-                    print(f"normalizer error: {exc}", flush=True)
-                    if not args.watch:
-                        return 1
-                else:
-                    if summary.fetched_events or not args.watch:
-                        print(
-                            f"normalized events={summary.fetched_events} "
-                            f"shots={summary.parsed_shots} "
-                            f"parse_errors={summary.parse_errors} "
-                            f"uploaded={summary.uploaded_rows} "
-                            f"cursor={summary.last_ingest_id}",
-                            flush=True,
-                        )
-                    if not args.watch:
-                        return 0
-
-                Event().wait(args.interval)
-        except KeyboardInterrupt:
-            print("\nNormalizer stopped.", flush=True)
-            return 0
+    print(
+        f"normalized events={summary.fetched_events} "
+        f"shots={summary.parsed_shots} "
+        f"duplicates={summary.duplicate_shots} "
+        f"parse_errors={summary.parse_errors} "
+        f"quarantined={summary.quarantined_shots} "
+        f"committed={summary.committed_shots} "
+        f"recorded_errors={summary.recorded_errors} "
+        f"cursor={summary.last_ingest_id} "
+        "caught_up=true",
+        flush=True,
+    )
+    return 0
 
 
 def _run_background_uploader(
@@ -448,6 +414,7 @@ def _add_supabase_arguments(
     parser: argparse.ArgumentParser,
     *,
     combined: bool,
+    worker: bool = False,
 ) -> None:
     prefix = "upload-" if combined else ""
     parser.add_argument("--url", default=os.getenv("SUPABASE_URL"))
@@ -463,9 +430,10 @@ def _add_supabase_arguments(
         action="store_true",
         help="read the secret key from a masked prompt instead of command history",
     )
-    parser.add_argument(f"--{prefix}batch-size", type=int, default=250)
     parser.add_argument(f"--{prefix}timeout", type=float, default=15.0)
-    parser.add_argument(f"--{prefix}interval", type=float, default=5.0)
+    if not worker:
+        parser.add_argument(f"--{prefix}batch-size", type=int, default=250)
+        parser.add_argument(f"--{prefix}interval", type=float, default=5.0)
 
 
 def _format_ingest_result(result: IngestResult) -> str | None:

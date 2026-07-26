@@ -10,9 +10,9 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
+from sius_ingest.keys import observation_key, shot_key, stable_event_key
 from sius_ingest.models import (
     FramedRecord,
-    GenericMessage,
     IngestResult,
     LaneState,
     OutboxItem,
@@ -74,15 +74,19 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
     ) -> IngestResult:
         raw_with_delimiter = record.raw + record.delimiter
         raw_hash = sha256(raw_with_delimiter).hexdigest()
-        observation_key = _observation_key(record, raw_hash)
+        observation_key_value = observation_key(
+            str(record.connection_id),
+            record.sequence,
+            raw_hash,
+        )
         message_type = _message_type(message, record.raw)
-        stable_event_key = _stable_event_key(
+        stable_event_key_value = stable_event_key(
             range_id=range_id,
             message=message,
             message_type=message_type,
             raw_hash=raw_hash,
         )
-        remote_event_key = source_event_key or observation_key
+        remote_event_key = source_event_key or observation_key_value
         parsed_payload = message_to_dict(message) if message else None
         lane_number = _lane_number(message)
         shooter_number = _shooter_number(message)
@@ -111,8 +115,8 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    observation_key,
-                    stable_event_key,
+                    observation_key_value,
+                    stable_event_key_value,
                     str(record.connection_id),
                     record.sequence,
                     isoformat_utc(record.completed_at),
@@ -146,7 +150,7 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
                         dedupe_key=remote_event_key,
                         payload={
                             "event_key": remote_event_key,
-                            "stable_event_key": stable_event_key,
+                            "stable_event_key": stable_event_key_value,
                             "range_id": range_id,
                             "connection_id": str(record.connection_id),
                             "record_sequence": record.sequence,
@@ -181,7 +185,7 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
             else:
                 row = cursor.execute(
                     "SELECT id FROM raw_events WHERE observation_key = ?",
-                    (observation_key,),
+                    (observation_key_value,),
                 ).fetchone()
                 assert row is not None
                 raw_event_id = int(row["id"])
@@ -195,13 +199,13 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
                     shooter_number=shooter_number,
                 )
 
-            shot_key = _shot_key(range_id, message, raw_hash)
+            shot_key_value = shot_key(range_id, message, raw_hash)
             if not project_locally:
                 return _result(
                     observation_inserted=observation_inserted,
                     message_type=message_type,
                     parse_error=parse_error,
-                    shot_key=shot_key,
+                    shot_key=shot_key_value,
                     lane_number=message.lane_number,
                     shooter_number=message.shooter_number,
                     shot_kind=message.shot_kind,
@@ -211,7 +215,7 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
 
             existing_shot = cursor.execute(
                 "SELECT 1 FROM shots WHERE shot_key = ?",
-                (shot_key,),
+                (shot_key_value,),
             ).fetchone()
             if existing_shot:
                 return _result(
@@ -219,7 +223,7 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
                     message_type=message_type,
                     parse_error=parse_error,
                     shot_duplicate=True,
-                    shot_key=shot_key,
+                    shot_key=shot_key_value,
                     lane_number=message.lane_number,
                     shooter_number=message.shooter_number,
                     shot_kind=message.shot_kind,
@@ -235,7 +239,7 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
             assignment = sessionizer.assign(
                 range_id=range_id,
                 shot=message,
-                shot_key=shot_key,
+                shot_key=shot_key_value,
                 received_at=record.completed_at,
                 state=state,
             )
@@ -246,7 +250,7 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
                 raw_event_id=raw_event_id,
                 raw_event_key=remote_event_key,
                 shot=message,
-                shot_key=shot_key,
+                shot_key=shot_key_value,
                 parsed_payload=parsed_payload,
                 parser_version=parser_version,
                 assignment=assignment,
@@ -258,7 +262,7 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
                 message_type=message_type,
                 parse_error=parse_error,
                 shot_inserted=True,
-                shot_key=shot_key,
+                shot_key=shot_key_value,
                 lane_number=message.lane_number,
                 shooter_number=message.shooter_number,
                 shot_kind=message.shot_kind,
@@ -878,47 +882,6 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
             if version < 2:
                 self._connection.executescript(_SCHEMA_V2)
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-
-
-def _observation_key(record: FramedRecord, raw_hash: str) -> str:
-    return _hash_key(str(record.connection_id), str(record.sequence), raw_hash)
-
-
-def _shot_key(range_id: str, shot: ShotMessage, raw_hash: str) -> str:
-    return _hash_key(
-        range_id,
-        "shot",
-        str(shot.lane_number),
-        str(shot.annual_ticks),
-        str(shot.event_sequence),
-        str(shot.shot_number),
-        raw_hash,
-    )
-
-
-def _stable_event_key(
-    *,
-    range_id: str,
-    message: ParsedMessage | None,
-    message_type: str | None,
-    raw_hash: str,
-) -> str:
-    if isinstance(message, ShotMessage):
-        return _shot_key(range_id, message, raw_hash)
-    if isinstance(message, GenericMessage) and message.event_sequence is not None:
-        return _hash_key(
-            range_id,
-            message.record_type,
-            str(message.lane_number),
-            str(message.event_sequence),
-            str(message.annual_ticks),
-            raw_hash,
-        )
-    return _hash_key(range_id, message_type or "unknown", raw_hash)
-
-
-def _hash_key(*parts: str) -> str:
-    return sha256("\0".join(parts).encode()).hexdigest()
 
 
 def _message_type(message: ParsedMessage | None, raw: bytes) -> str | None:
