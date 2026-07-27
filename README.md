@@ -1,9 +1,10 @@
 # sius-ingest
 
 `sius-ingest` captures the TCP stream exposed by SIUSData and forwards every
-unique raw record to Supabase through a durable local SQLite outbox. A separate
-normalizer can run on any other computer to build athlete sessions, sighter
-blocks, match relays, and canonical shots from those immutable raw events.
+unique raw record to Supabase through a durable local SQLite outbox. A
+disposable daily worker builds athlete sessions, sighter blocks, match relays,
+and canonical shots from those immutable raw events while keeping its durable
+checkpoint and lane state in Supabase.
 
 The range Windows PC is only the SIUS-to-Supabase bridge. Parsing and projection
 work can run on macOS, Linux, or Windows and can stop temporarily without losing
@@ -23,7 +24,9 @@ data. Both programs use only the Python standard library at runtime.
 - groups normalized shots by firing number, lane, sighter block, and match relay;
 - starts a new relay on a sighter/match transition or reset shot counter;
 - never assumes that a relay contains exactly 60 shots;
-- checkpoints normalization only after its Supabase writes succeed;
+- commits normalization output, lane state, and its monotonic checkpoint in one
+  Supabase transaction;
+- processes only raw events newer than the remote checkpoint on normal runs;
 - makes all normalized tables reproducible from raw events.
 
 See [docs/protocol-observations.md](docs/protocol-observations.md) for the
@@ -34,6 +37,7 @@ evidence and explicit assumptions behind the parser.
 - Python 3.11 or newer
 - SIUSData TCP access, normally `127.0.0.1:4000` on the range PC
 - optional Supabase project for remote storage
+- Node.js 22.13 or newer for the local practice viewer
 
 ## Install
 
@@ -62,17 +66,18 @@ python -m pip install -e .
 The repository includes a manual GitHub Actions build that produces a
 self-contained 64-bit Windows console executable:
 
-1. Open the repository's **Actions** tab.
-2. Select **Build Windows executable**.
-3. Choose **Run workflow** on the desired branch.
-4. When the run finishes, download the
-   `sius-ingest-windows-x64-...` artifact.
-5. Extract both `sius-ingest.exe` and `SHA256SUMS.txt` into a permanent folder
-   on the range PC.
+Download `sius-ingest.exe` and `SHA256SUMS.txt` from the latest public
+[GitHub release](https://github.com/eerriikk-pro/sius-ingest/releases). Release
+assets do not require a GitHub login.
+
+Maintainers can also open the repository's **Actions** tab, select
+**Build Windows executable**, and manually build any branch, tag, or commit.
+Providing a matching `release_tag` such as `v0.4.0` creates or updates the public
+release assets.
 
 The workflow is manual-only; it does not run for pushes or pull requests. The
-artifact is retained by GitHub for 30 days. Python is not required on the PC
-that runs the resulting executable. The executable is not currently
+build artifact is retained by GitHub for 30 days. Python is not required on the
+PC that runs the resulting executable. The executable is not currently
 code-signed, so Windows may identify its publisher as unknown.
 
 Place `sius-ingest.exe` in a permanent folder on the range PC. With SIUSData
@@ -97,6 +102,11 @@ Launching without arguments is equivalent to `run`. It uses
 `data\sius-raw.sqlite3`, and capture directory `captures\`. If either Supabase
 setting is missing, it clearly reports that upload is disabled and continues
 collecting locally.
+
+Upgrading the executable does not replace `.env`, `captures/`, or
+`data/sius-raw.sqlite3`. Stop the old process, replace only the executable and
+checksum, then start it again from the same directory. Pending raw uploads
+remain in SQLite.
 
 To verify the download against the generated checksum:
 
@@ -177,16 +187,18 @@ sius-ingest status --database data/sius-raw.sqlite3
 sius-ingest status --database data/sius-raw.sqlite3 --json
 ```
 
-The range-PC result should show raw events and raw upload counts. Projection
-counts belong to the normalizer's separate SQLite database.
+The range-PC result should show raw events and raw upload counts. Sessions,
+phases, and shots are built remotely and therefore remain zero in this local
+database.
 
 ## Configure Supabase
 
 1. Create a Supabase project.
 2. Run [supabase/schema.sql](supabase/schema.sql) in the SQL editor.
-3. For the clean v0.3 cutover from an experimental installation, run
-   [supabase/reset_experimental_data.sql](supabase/reset_experimental_data.sql)
-   once. It permanently removes the previous SIUS rows.
+3. For the v0.4 normalizer cutover, run
+   [supabase/reset_projection.sql](supabase/reset_projection.sql) once. It
+   preserves every raw event while clearing the rebuildable sessions, phases,
+   shots, lane state, errors, and checkpoint.
 4. Copy the project URL from the project's **Connect** dialog.
 5. In **Settings > API Keys**, create a server-side secret key.
 6. Supply `SUPABASE_URL` and `SUPABASE_SECRET_KEY` to both processes.
@@ -223,46 +235,77 @@ remain in the SQLite outbox and are retried with backoff.
 The standalone `live` and `upload --watch` commands remain available for
 diagnostics and split-process deployments. `upload` sends raw events only.
 
-## Run the normalizer elsewhere
+## Run the durable normalizer
 
-Clone and install this repository on the Mac, server, or other computer that
-will build the normalized tables. Save the same two Supabase variables, then
-run:
+The normalizer is a one-shot command. It stores no local checkpoint or outbox:
+all durable progress lives in Supabase. Save the same two Supabase variables
+and run:
 
 ```bash
 set -a
 source .env
 set +a
-sius-ingest normalize --watch
+sius-ingest normalize
 ```
 
-Alternatively, export `SUPABASE_URL` and `SUPABASE_SECRET_KEY` directly. The
-application never writes those credentials into SQLite.
-
-No manual SQLite setup is required. The worker creates
-`data/sius-normalizer.sqlite3` and stores its durable raw-event checkpoint,
-lane state, and projection outbox there. It reads `sius_raw_events` in
-server-assigned `ingest_id` order and writes:
+Alternatively, export `SUPABASE_URL` and `SUPABASE_SECRET_KEY` directly. No
+manual SQLite setup is required. The worker reads `sius_raw_events` after the
+server-side checkpoint in `ingest_id` order and writes:
 
 - `sius_sessions`;
 - `sius_phases`;
 - `sius_shots`.
 
-Stopping the normalizer is safe. On restart it drains any pending projection
-writes, resumes after the last committed raw event, and catches up. Run without
-`--watch` for one catch-up pass:
+Each page commits its sessions, phases, shots, errors, per-lane state, and
+checkpoint through one PostgreSQL function. A failed request leaves the
+checkpoint unchanged, so rerunning is safe. Duplicate shot observations advance
+the raw cursor without changing relay state or canonical shot counts.
+
+The included **Normalize Supabase practice data** GitHub Actions workflow runs
+daily at 03:17 in `America/Vancouver` and can also be started manually:
+
+1. Add repository Actions secrets named `SUPABASE_URL` and
+   `SUPABASE_SECRET_KEY`.
+2. Open **Actions > Normalize Supabase practice data**.
+3. Choose **Run workflow** for the initial backfill.
+4. Confirm its ending cursor matches the newest raw `ingest_id`.
+5. Run it a second time and confirm it reports zero new events.
+
+The repository is public, so standard GitHub-hosted runners are free. GitHub
+can disable scheduled workflows after 60 days without repository activity; if
+that happens, re-enable the workflow and run it manually. The remote checkpoint
+will catch up every missed event rather than relying on a two- or three-day
+lookback.
+
+Use [supabase/reset_projection.sql](supabase/reset_projection.sql) for a
+controlled rebuild after an incompatible parser/sessionizer version change. The
+normalizer refuses to mix different projection versions silently.
+
+## Run the local practice viewer
+
+The proof-of-concept viewer lives in [`web/`](web/). It looks up a firing
+number, accepts a configurable 1–365 day window, and displays normalized shots
+using the stored session, sighter-block, and match-relay boundaries. Match
+relays are not split at an arbitrary 60 shots.
+
+The viewer reads the existing repository-level `.env` file. Its Next.js route
+handler queries Supabase on the server, so `SUPABASE_SECRET_KEY` is never sent
+to browser code.
 
 ```bash
-sius-ingest normalize
+cd web
+npm install
+npm run dev
 ```
 
-Use an always-on machine if normalized tables need to update continuously. The
-range-PC bridge continues preserving and forwarding raw data while the worker is
-offline.
+Open <http://127.0.0.1:3000>, enter a member ID, and choose the number of days
+to inspect. `SIUS_RANGE_ID` is optional; when present, the viewer limits results
+to that range. `SIUS_VIEWER_TIMEZONE` controls displayed dates and defaults to
+`America/Vancouver`.
 
-If the Supabase data is reset with `reset_experimental_data.sql`, also remove
-the normalizer's local `data/sius-normalizer.sqlite3` before starting it again.
-This is only necessary for an intentional destructive reset.
+The target display uses the scale inferred from the controlled SIUS capture:
+native X/Y coordinates are multiplied by 1000 to plot millimetres. The raw
+native values remain unchanged in Supabase.
 
 ### Data retained remotely
 
@@ -296,8 +339,8 @@ Frequently used options have environment-variable equivalents:
 | `SIUS_PORT` | `4000` | SIUSData TCP port |
 | `SIUS_OUTPUT` | `captures` | lossless capture parent directory |
 | `SIUS_DATABASE` | `data/sius-raw.sqlite3` | range-PC raw outbox |
-| `SIUS_NORMALIZER_DATABASE` | `data/sius-normalizer.sqlite3` | worker state |
 | `SIUS_RANGE_ID` | `default-range` | stable range identifier |
+| `SIUS_VIEWER_TIMEZONE` | `America/Vancouver` | local viewer display timezone |
 | `SUPABASE_URL` | none | Supabase project URL |
 | `SUPABASE_SECRET_KEY` | none | private `sb_secret_...` uploader credential |
 
@@ -317,10 +360,15 @@ Range PC
 
 External worker
     Supabase sius_raw_events
-        -> monotonic checkpoint
+        -> remote monotonic checkpoint + lane state
         -> conservative parser
         -> relay sessionizer
-        -> SQLite projection outbox
+        -> atomic Supabase RPC
+        -> sessions + phases + shots + errors
+
+Local viewer
+    Browser
+        -> server-only viewer API
         -> Supabase sessions + phases + shots
 ```
 
@@ -329,10 +377,12 @@ Key modules:
 - `tcp_source.py`, `framing.py`, `capture.py` — byte-level acquisition;
 - `parser.py`, `models.py` — observed protocol and typed domain records;
 - `sessionizer.py` — deterministic lane/session/relay transitions;
-- `outbox.py` — SQLite schema, transactions, deduplication, and outbox;
+- `outbox.py` — range-PC SQLite schema, transactions, and raw upload outbox;
 - `replay_source.py` — verified replay of previous captures;
 - `remote_source.py` — ordered raw-event reads from Supabase;
-- `normalizer.py` — checkpointed, replayable projection worker;
+- `projection.py` — pure shot/session/relay projection engine;
+- `remote_projection.py` — Supabase checkpoint, lane state, and atomic commits;
+- `normalizer.py` — incremental, remotely durable projection orchestration;
 - `uploader.py` — scoped, idempotent Supabase PostgREST uploads;
 - `app.py` — operational `run`, `replay`, `status`, `upload`, and `normalize`
   commands.
@@ -354,3 +404,14 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 
 Tests use synthetic firing numbers and records. Real captures and athlete names
 must not be committed.
+
+Run the viewer checks separately:
+
+```bash
+cd web
+npm install
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```

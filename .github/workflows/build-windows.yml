@@ -2,6 +2,16 @@ name: Build Windows executable
 
 on:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or commit to build
+        required: true
+        default: main
+        type: string
+      release_tag:
+        description: Optional public release tag to create/update
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -11,9 +21,13 @@ jobs:
     name: Build Windows x64
     runs-on: windows-latest
     timeout-minutes: 15
+    outputs:
+      project_version: ${{ steps.metadata.outputs.project_version }}
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
@@ -27,23 +41,79 @@ jobs:
         shell: pwsh
         run: ./scripts/build_windows.ps1 -SkipInstall
 
+      - name: Read project version
+        id: metadata
+        shell: pwsh
+        run: |
+          $ProjectVersion = (
+            Select-String -Path pyproject.toml -Pattern '^version = "(.+)"$'
+          ).Matches.Groups[1].Value
+          "project_version=$ProjectVersion" >> $env:GITHUB_OUTPUT
+
       - name: Smoke test packaged executable
         shell: pwsh
         run: |
           ./dist/sius-ingest.exe --help
           ./dist/sius-ingest.exe run --help
           ./dist/sius-ingest.exe normalize --help
+          ./dist/sius-ingest.exe replay `
+            tests/fixtures/windows-smoke-records.jsonl `
+            --database "${{ runner.temp }}\sius-ingest-smoke.sqlite3" `
+            --quiet
           ./dist/sius-ingest.exe status `
             --database "${{ runner.temp }}\sius-ingest-smoke.sqlite3" `
             --json
+          $Status = ./dist/sius-ingest.exe status `
+            --database "${{ runner.temp }}\sius-ingest-smoke.sqlite3" `
+            --json | ConvertFrom-Json
+          if ($Status.raw_events -ne 1 -or $Status.shots -ne 0) {
+            throw "Packaged replay must retain raw-only range-PC behavior."
+          }
 
       - name: Upload executable
         uses: actions/upload-artifact@v6
         with:
-          name: sius-ingest-windows-x64-${{ github.sha }}
+          name: sius-ingest-windows-x64
           path: |
             dist/sius-ingest.exe
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+  publish:
+    name: Publish public release
+    if: inputs.release_tag != ''
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: sius-ingest-windows-x64
+          path: dist
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PROJECT_VERSION: ${{ needs.build.outputs.project_version }}
+        run: |
+          if [[ "v$PROJECT_VERSION" != "$RELEASE_TAG" ]]; then
+            echo "Release tag $RELEASE_TAG does not match v$PROJECT_VERSION." >&2
+            exit 1
+          fi
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "${{ github.repository }}" \
+              --target "${{ inputs.ref }}" \
+              --title "$RELEASE_TAG" \
+              --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" \
+            dist/sius-ingest.exe \
+            dist/SHA256SUMS.txt \
+            --repo "${{ github.repository }}" \
+            --clobber

@@ -1,0 +1,46 @@
+name: Normalize Supabase practice data
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+      timezone: "America/Vancouver"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sius-supabase-normalizer
+  cancel-in-progress: false
+
+jobs:
+  normalize:
+    name: Process new SIUS raw events
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install worker
+        run: python -m pip install .
+
+      - name: Normalize new events
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          set -o pipefail
+          output="$(sius-ingest normalize)"
+          printf '%s\n' "$output"
+          {
+            echo "## SIUS normalization"
+            echo
+            echo '```text'
+            printf '%s\n' "$output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

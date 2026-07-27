@@ -37,7 +37,9 @@ class SupabaseRawEventSourceTests(unittest.TestCase):
                     {
                         "ingest_id": 42,
                         "event_key": "event-42",
+                        "stable_event_key": "stable-event-42",
                         "range_id": "range-a",
+                        "event_type": "_STAT",
                         "connection_id": str(CONNECTION_ID),
                         "record_sequence": 9,
                         "received_at": "2026-07-25T00:01:31.374Z",
@@ -61,6 +63,8 @@ class SupabaseRawEventSourceTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].ingest_id, 42)
         self.assertEqual(events[0].event_key, "event-42")
+        self.assertEqual(events[0].stable_event_key, "stable-event-42")
+        self.assertEqual(events[0].event_type, "_STAT")
         self.assertEqual(events[0].record.raw, raw)
         self.assertEqual(events[0].record.delimiter, delimiter)
         query = parse_qs(urlparse(requests[0][0].full_url).query)

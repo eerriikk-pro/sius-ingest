@@ -1,33 +1,31 @@
-"""Build replayable Supabase projections from immutable raw SIUS events."""
+"""Build durable Supabase projections from immutable raw SIUS events."""
 
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sius_ingest.ingest import IngestionConfig, IngestionService
-from sius_ingest.models import SessionizerConfig
-from sius_ingest.outbox import (
-    REMOTE_PHASES,
-    REMOTE_SESSIONS,
-    REMOTE_SHOTS,
-    SQLiteEventStore,
+from sius_ingest.projection import ProjectionBuilder
+from sius_ingest.remote_projection import (
+    RemoteProjectionConflict,
+    RemoteProjectionError,
+    RemoteProjectionState,
+    SupabaseProjectionRepository,
 )
-from sius_ingest.remote_source import SupabaseRawEventSource
-from sius_ingest.sessionizer import RelaySessionizer
-from sius_ingest.uploader import SupabaseUploader
+from sius_ingest.remote_source import RemoteSourceError, SupabaseRawEventSource
 
-NORMALIZER_VERSION = "projection-v1"
-PROJECTION_TOPICS = (REMOTE_SESSIONS, REMOTE_PHASES, REMOTE_SHOTS)
+NORMALIZER_VERSION = "projection-v2"
 
 
 @dataclass(frozen=True, slots=True)
 class NormalizationSummary:
-    """Work completed during one catch-up pass."""
+    """Work committed during one catch-up pass."""
 
     fetched_events: int
     parsed_shots: int
     duplicate_shots: int
     parse_errors: int
-    uploaded_rows: int
+    quarantined_shots: int
+    committed_shots: int
+    recorded_errors: int
     last_ingest_id: int
 
 
@@ -36,120 +34,111 @@ class NormalizationError(RuntimeError):
 
 
 class SupabaseNormalizer:
-    """Consume raw events in order and upload their deterministic projections."""
+    """Consume raw events in order and atomically commit deterministic projections."""
 
     def __init__(
         self,
         *,
-        store: SQLiteEventStore,
         source: SupabaseRawEventSource,
-        uploader: SupabaseUploader,
+        repository: SupabaseProjectionRepository,
         projection_name: str = "default",
         page_size: int = 500,
-        upload_batch_size: int = 250,
         session_timeout: timedelta = timedelta(hours=4),
+        conflict_retries: int = 3,
     ) -> None:
         if not projection_name.strip():
             raise ValueError("projection_name must not be empty")
         if not 1 <= page_size <= 1000:
             raise ValueError("page_size must be between 1 and 1000")
-        if upload_batch_size <= 0:
-            raise ValueError("upload_batch_size must be positive")
         if session_timeout <= timedelta(0):
             raise ValueError("session_timeout must be positive")
+        if conflict_retries < 0:
+            raise ValueError("conflict_retries must not be negative")
 
-        self._store = store
         self._source = source
-        self._uploader = uploader
+        self._repository = repository
         self._projection_name = projection_name
         self._page_size = page_size
-        self._upload_batch_size = upload_batch_size
         self._session_timeout = session_timeout
-        self._services: dict[str, IngestionService] = {}
+        self._conflict_retries = conflict_retries
 
     def normalize_available(self) -> NormalizationSummary:
-        cursor = self._store.projection_cursor(self._projection_name)
-        if cursor and cursor.normalizer_version != NORMALIZER_VERSION:
-            raise NormalizationError("normalizer version changed; use a fresh normalizer database")
-
-        last_ingest_id = cursor.last_ingest_id if cursor else 0
-        processed_events = cursor.processed_events if cursor else 0
-        uploaded = self._flush_projection_outbox()
         fetched = 0
         shots = 0
         duplicates = 0
         parse_errors = 0
+        quarantined = 0
+        committed_shots = 0
+        recorded_errors = 0
+        conflict_attempts = 0
 
-        while True:
-            events = self._source.fetch_after(
-                last_ingest_id,
-                limit=self._page_size,
-            )
-            if not events:
-                break
-
-            for event in events:
-                service = self._service_for_range(event.range_id)
-                result = service.process(
-                    event.record,
-                    source_event_key=event.event_key,
+        try:
+            state = self._load_state()
+            while True:
+                events = self._source.fetch_after(
+                    state.last_ingest_id,
+                    limit=self._page_size,
                 )
-                fetched += 1
-                shots += int(result.shot_inserted)
-                duplicates += int(result.shot_duplicate)
-                parse_errors += int(result.parse_error is not None)
+                if not events:
+                    break
 
-            uploaded += self._flush_projection_outbox()
-            last_ingest_id = events[-1].ingest_id
-            processed_events += len(events)
-            self._store.save_projection_cursor(
-                name=self._projection_name,
-                last_ingest_id=last_ingest_id,
-                processed_events=processed_events,
+                candidate_keys = {event.stable_event_key for event in events}
+                existing_shot_keys = self._repository.existing_shot_keys(candidate_keys)
+                page = ProjectionBuilder(
+                    lane_states=state.lane_states,
+                    existing_shot_keys=existing_shot_keys,
+                    session_timeout=self._session_timeout,
+                ).build(events)
+
+                try:
+                    commit = self._repository.commit_page(
+                        projection_name=self._projection_name,
+                        normalizer_version=NORMALIZER_VERSION,
+                        expected_last_ingest_id=state.last_ingest_id,
+                        next_last_ingest_id=events[-1].ingest_id,
+                        page=page,
+                    )
+                except RemoteProjectionConflict:
+                    conflict_attempts += 1
+                    if conflict_attempts > self._conflict_retries:
+                        raise
+                    state = self._load_state()
+                    continue
+
+                if commit.last_ingest_id != events[-1].ingest_id:
+                    raise NormalizationError(
+                        "Supabase returned an unexpected projection checkpoint"
+                    )
+
+                conflict_attempts = 0
+                fetched += len(events)
+                shots += page.parsed_shots
+                duplicates += page.duplicate_shots
+                parse_errors += page.parse_errors
+                quarantined += page.quarantined_shots
+                committed_shots += commit.committed_shots
+                recorded_errors += commit.recorded_errors
+                state = self._load_state()
+            self._repository.mark_success(
+                projection_name=self._projection_name,
                 normalizer_version=NORMALIZER_VERSION,
             )
-
-            if len(events) < self._page_size:
-                break
+        except (RemoteProjectionError, RemoteSourceError) as exc:
+            raise NormalizationError(str(exc)) from exc
 
         return NormalizationSummary(
             fetched_events=fetched,
             parsed_shots=shots,
             duplicate_shots=duplicates,
             parse_errors=parse_errors,
-            uploaded_rows=uploaded,
-            last_ingest_id=last_ingest_id,
+            quarantined_shots=quarantined,
+            committed_shots=committed_shots,
+            recorded_errors=recorded_errors,
+            last_ingest_id=state.last_ingest_id,
         )
 
-    def _service_for_range(self, range_id: str) -> IngestionService:
-        service = self._services.get(range_id)
-        if service is None:
-            service = IngestionService(
-                store=self._store,
-                config=IngestionConfig(
-                    range_id=range_id,
-                    project_locally=True,
-                    enqueue_raw_upload=False,
-                ),
-                sessionizer=RelaySessionizer(
-                    SessionizerConfig(session_timeout=self._session_timeout)
-                ),
-            )
-            self._services[range_id] = service
-        return service
-
-    def _flush_projection_outbox(self) -> int:
-        uploaded = 0
-        while True:
-            pending = self._store.pending_upload_count(PROJECTION_TOPICS)
-            if pending == 0:
-                return uploaded
-
-            summary = self._uploader.upload_once(limit=self._upload_batch_size)
-            uploaded += summary.uploaded
-            if summary.error:
-                raise NormalizationError(summary.error)
-            if summary.attempted == 0:
-                raise NormalizationError(
-                    f"{pending} projection uploads are waiting for their retry time"
-                )
+    def _load_state(self) -> RemoteProjectionState:
+        return self._repository.load_state(
+            projection_name=self._projection_name,
+            normalizer_version=NORMALIZER_VERSION,
+        )
