@@ -54,14 +54,30 @@ class EffectiveArgumentsTests(unittest.TestCase):
         self.assertFalse(hasattr(args, "database"))
         self.assertFalse(hasattr(args, "watch"))
 
-    def test_live_capture_enables_self_healing_defaults(self) -> None:
-        args = build_parser().parse_args(["run"])
+    def test_idle_heuristics_are_disabled_by_default(self) -> None:
+        with patch.dict(environ, {}, clear=True):
+            args = build_parser().parse_args(["run"])
 
-        self.assertEqual(args.idle_reconnect_seconds, 600)
-        self.assertEqual(args.health_interval_seconds, 300)
+        self.assertIsNone(args.idle_reconnect_seconds)
+        self.assertIsNone(args.health_interval_seconds)
+
+    def test_idle_heuristics_can_be_enabled_through_the_environment(self) -> None:
+        with patch.dict(
+            environ,
+            {
+                "SIUS_IDLE_RECONNECT_SECONDS": "120",
+                "SIUS_HEALTH_INTERVAL_SECONDS": "60",
+            },
+            clear=True,
+        ):
+            args = build_parser().parse_args(["run"])
+
+        self.assertEqual(args.idle_reconnect_seconds, 120)
+        self.assertEqual(args.health_interval_seconds, 60)
 
     def test_zero_disables_an_optional_live_interval(self) -> None:
         self.assertIsNone(_disableable_seconds(0, "--example"))
+        self.assertIsNone(_disableable_seconds(None, "--example"))
 
     def test_duplicate_replay_does_not_flood_the_console(self) -> None:
         result = IngestResult(

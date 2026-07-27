@@ -104,12 +104,8 @@ class TcpSourceTests(unittest.TestCase):
         received = b"".join(event.data for event in events if isinstance(event, TcpChunk))
         self.assertEqual(received, expected)
 
-    def test_idle_watchdog_and_health_reporting_can_be_disabled(self) -> None:
-        config = TcpSourceConfig(
-            host="127.0.0.1",
-            idle_reconnect_seconds=None,
-            health_interval_seconds=None,
-        )
+    def test_idle_watchdog_and_health_reporting_are_disabled_by_default(self) -> None:
+        config = TcpSourceConfig(host="127.0.0.1")
 
         self.assertIsNone(config.idle_reconnect_seconds)
         self.assertIsNone(config.health_interval_seconds)

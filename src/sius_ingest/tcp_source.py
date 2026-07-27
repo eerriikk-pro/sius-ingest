@@ -16,8 +16,8 @@ from sius_ingest.models import (
 )
 from sius_ingest.time_utils import utc_now
 
-DEFAULT_IDLE_RECONNECT_SECONDS = 10 * 60.0
-DEFAULT_HEALTH_INTERVAL_SECONDS = 5 * 60.0
+DEFAULT_IDLE_RECONNECT_SECONDS: float | None = None
+DEFAULT_HEALTH_INTERVAL_SECONDS: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

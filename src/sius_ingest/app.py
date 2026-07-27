@@ -23,6 +23,7 @@ from sius_ingest.tcp_source import (
     DEFAULT_IDLE_RECONNECT_SECONDS,
 )
 from sius_ingest.uploader import SupabaseConfig, SupabaseUploader
+from sius_ingest.windows_console import protect_windows_console
 
 DEFAULT_DATABASE = Path(os.getenv("SIUS_DATABASE", "data/sius-raw.sqlite3"))
 DEFAULT_RANGE_ID = os.getenv("SIUS_RANGE_ID", "default-range")
@@ -89,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    protect_windows_console()
     args = build_parser().parse_args(_effective_argv(argv))
     return int(args.handler(args))
 
@@ -421,7 +423,7 @@ def _add_live_arguments(parser: argparse.ArgumentParser) -> None:
         ),
         help=(
             "reconnect an open stream after this many seconds without TCP data "
-            f"(default: {DEFAULT_IDLE_RECONNECT_SECONDS:.0f}; 0 disables)"
+            "(default: disabled; 0 disables)"
         ),
     )
     parser.add_argument(
@@ -431,10 +433,7 @@ def _add_live_arguments(parser: argparse.ArgumentParser) -> None:
             "SIUS_HEALTH_INTERVAL_SECONDS",
             DEFAULT_HEALTH_INTERVAL_SECONDS,
         ),
-        help=(
-            "report an idle connection at this interval "
-            f"(default: {DEFAULT_HEALTH_INTERVAL_SECONDS:.0f}; 0 disables)"
-        ),
+        help=("report an idle connection at this interval (default: disabled; 0 disables)"),
     )
     parser.add_argument("--once", action="store_true")
     parser.add_argument(
@@ -512,7 +511,7 @@ def _env_int(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer") from exc
 
 
-def _env_float(name: str, default: float) -> float:
+def _env_float(name: str, default: float | None) -> float | None:
     value = os.getenv(name)
     if value is None:
         return default
@@ -522,7 +521,9 @@ def _env_float(name: str, default: float) -> float:
         raise ValueError(f"{name} must be a number") from exc
 
 
-def _disableable_seconds(value: float, argument_name: str) -> float | None:
+def _disableable_seconds(value: float | None, argument_name: str) -> float | None:
+    if value is None:
+        return None
     if value < 0:
         raise SystemExit(f"{argument_name} must not be negative")
     return value or None

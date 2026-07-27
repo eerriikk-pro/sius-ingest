@@ -12,8 +12,9 @@ data. Both programs use only the Python standard library at runtime.
 
 ## Current behavior
 
-- reconnects after socket errors and after 10 minutes without any TCP data;
-- enables TCP keepalive and reports open-but-idle connections every 5 minutes;
+- reconnects after socket errors or when SIUSData closes the connection;
+- enables TCP keepalive while leaving idle reconnect heuristics off by default;
+- disables Windows QuickEdit so clicking the console cannot pause collection;
 - starts raw collection and background upload together when double-clicked;
 - writes a lossless capture for future protocol analysis;
 - retains every received record locally, including unknown and malformed ones;
@@ -73,7 +74,7 @@ assets do not require a GitHub login.
 
 Maintainers can also open the repository's **Actions** tab, select
 **Build Windows executable**, and manually build any branch, tag, or commit.
-Providing a matching `release_tag` such as `v0.4.1` creates or updates the public
+Providing a matching `release_tag` such as `v0.4.2` creates or updates the public
 release assets.
 
 The workflow is manual-only; it does not run for pushes or pull requests. The
@@ -104,13 +105,17 @@ Launching without arguments is equivalent to `run`. It uses
 setting is missing, it clearly reports that upload is disabled and continues
 collecting locally.
 
-SIUSData can occasionally leave a TCP client connected while silently stopping
-its data feed. The collector prints an idle health line after five minutes and
-automatically replaces the connection after ten minutes without any TCP bytes.
-SIUSData may replay its current backlog after reconnecting; stable shot and
-counter records already seen by the raw bridge are not queued or uploaded
-again. Set `SIUS_IDLE_RECONNECT_SECONDS=0` only when deliberately disabling
-this safety mechanism.
+On Windows, the collector disables the console's QuickEdit mode at startup and
+prints a confirmation. This prevents an accidental click or text selection from
+pausing the entire process. Normal reconnects after socket errors and peer
+closures remain enabled, as does TCP keepalive.
+
+Idle health logs and forced idle reconnects are disabled by default because a
+quiet range is indistinguishable from a silent stream. They remain available as
+explicit diagnostics: set `SIUS_HEALTH_INTERVAL_SECONDS` or
+`SIUS_IDLE_RECONNECT_SECONDS` to a positive number of seconds. SIUSData may
+replay its current backlog after any reconnect; stable shot and counter records
+already seen by the raw bridge are not queued or uploaded again.
 
 Upgrading the executable does not replace `.env`, `captures/`, or
 `data/sius-raw.sqlite3`. Stop the old process, replace only the executable and
@@ -349,8 +354,8 @@ Frequently used options have environment-variable equivalents:
 | `SIUS_OUTPUT` | `captures` | lossless capture parent directory |
 | `SIUS_DATABASE` | `data/sius-raw.sqlite3` | range-PC raw outbox |
 | `SIUS_RANGE_ID` | `default-range` | stable range identifier |
-| `SIUS_IDLE_RECONNECT_SECONDS` | `600` | replace a silent TCP stream; `0` disables |
-| `SIUS_HEALTH_INTERVAL_SECONDS` | `300` | idle connection log interval; `0` disables |
+| `SIUS_IDLE_RECONNECT_SECONDS` | disabled | optionally replace an idle TCP stream |
+| `SIUS_HEALTH_INTERVAL_SECONDS` | disabled | optional idle connection log interval |
 | `SIUS_VIEWER_TIMEZONE` | `America/Vancouver` | local viewer display timezone |
 | `SUPABASE_URL` | none | Supabase project URL |
 | `SUPABASE_SECRET_KEY` | none | private `sb_secret_...` uploader credential |
