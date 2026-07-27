@@ -4,8 +4,8 @@ import type { ReactNode } from "react";
 import "@/app/globals.css";
 
 export const metadata: Metadata = {
-  title: "SIUS Practice Viewer",
-  description: "Local practice-shot viewer for SIUS range data",
+  title: "RRGC Practice Viewer",
+  description: "Secure member access to SIUS practice-shot history",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

@@ -8,8 +8,18 @@ import type { ApiErrorResponse, MemberActivity } from "@/lib/types";
 
 const DEFAULT_DAYS = 7;
 
-export function MemberViewer() {
-  const [memberId, setMemberId] = useState("");
+interface MemberViewerProps {
+  approvedMemberNumbers: string[];
+  isAdmin: boolean;
+}
+
+export function MemberViewer({
+  approvedMemberNumbers,
+  isAdmin,
+}: MemberViewerProps) {
+  const [memberId, setMemberId] = useState(
+    approvedMemberNumbers.length === 1 ? approvedMemberNumbers[0] : "",
+  );
   const [days, setDays] = useState(DEFAULT_DAYS);
   const [activity, setActivity] = useState<MemberActivity | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -34,7 +44,7 @@ export function MemberViewer() {
 
     try {
       const response = await fetch(
-        `/api/members/${encodeURIComponent(normalizedMemberId)}/shots?days=${days}`,
+        `/api/shots?memberNumber=${encodeURIComponent(normalizedMemberId)}&days=${days}`,
         {
           cache: "no-store",
         },
@@ -71,20 +81,39 @@ export function MemberViewer() {
       <section className="search-card" aria-labelledby="lookup-heading">
         <div>
           <p className="section-kicker">Member history</p>
-          <h2 id="lookup-heading">Find recent practice</h2>
+          <h2 id="lookup-heading">
+            {isAdmin ? "Find recent practice" : "Your recent practice"}
+          </h2>
         </div>
         <form className="search-form" onSubmit={handleSubmit}>
           <label>
             <span>Member ID</span>
-            <input
-              autoComplete="off"
-              inputMode="numeric"
-              maxLength={64}
-              name="memberId"
-              onChange={(event) => setMemberId(event.target.value)}
-              placeholder="e.g. 513"
-              value={memberId}
-            />
+            {!isAdmin && approvedMemberNumbers.length > 1 ? (
+              <select
+                name="memberId"
+                onChange={(event) => setMemberId(event.target.value)}
+                required
+                value={memberId}
+              >
+                <option value="">Select a member</option>
+                {approvedMemberNumbers.map((number) => (
+                  <option key={number} value={number}>
+                    {number}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                autoComplete="off"
+                inputMode="numeric"
+                maxLength={64}
+                name="memberId"
+                onChange={(event) => setMemberId(event.target.value)}
+                placeholder="e.g. 513"
+                readOnly={!isAdmin && approvedMemberNumbers.length === 1}
+                value={memberId}
+              />
+            )}
           </label>
           <label className="days-field">
             <span>Past days</span>
@@ -102,8 +131,7 @@ export function MemberViewer() {
           </button>
         </form>
         <p className="search-note">
-          Results use the normalized session and phase boundaries produced by
-          sius-ingest.
+          Results are read-only and limited by Supabase row-level security.
         </p>
       </section>
 

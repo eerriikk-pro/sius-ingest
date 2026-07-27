@@ -135,6 +135,168 @@ create index if not exists sius_shots_session_phase_number_idx
 create index if not exists sius_shots_range_lane_received_idx
     on public.sius_shots (range_id, lane_number, received_at);
 
+create index if not exists sius_shots_range_shooter_received_idx
+    on public.sius_shots (range_id, shooter_number, received_at);
+
+-- Authenticated viewer accounts and their administrator-approved firing
+-- numbers. Access is intentionally many-to-many: a user may have several
+-- numbers, and a number may be shared by several approved users.
+create table if not exists public.sius_users (
+    user_id uuid primary key references auth.users (id) on delete cascade,
+    email text not null check (btrim(email) <> ''),
+    role text not null default 'user' check (role in ('user', 'admin')),
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create table if not exists public.sius_member_access (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid not null
+        references public.sius_users (user_id) on delete cascade,
+    range_id text not null check (btrim(range_id) <> ''),
+    member_number text not null
+        check (member_number ~ '^[A-Za-z0-9_-]{1,64}$'),
+    status text not null default 'pending'
+        check (status in ('pending', 'approved', 'rejected', 'revoked')),
+    requested_at timestamptz not null default now(),
+    reviewed_at timestamptz,
+    reviewed_by uuid references public.sius_users (user_id),
+    unique (user_id, range_id, member_number)
+);
+
+create index if not exists sius_member_access_user_scope_idx
+    on public.sius_member_access (user_id, range_id, status, member_number);
+
+create index if not exists sius_member_access_review_queue_idx
+    on public.sius_member_access (range_id, status, requested_at);
+
+create schema if not exists private;
+
+create or replace function private.sius_sync_auth_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+    if new.email is null or btrim(new.email) = '' then
+        raise exception 'SIUS viewer accounts require an email address';
+    end if;
+
+    insert into public.sius_users (user_id, email, updated_at)
+    values (new.id, lower(btrim(new.email)), now())
+    on conflict (user_id) do update set
+        email = excluded.email,
+        updated_at = now();
+    return new;
+end;
+$$;
+
+drop trigger if exists sius_sync_auth_user on auth.users;
+create trigger sius_sync_auth_user
+after insert or update of email on auth.users
+for each row execute function private.sius_sync_auth_user();
+
+-- Backfill accounts that existed before this schema was installed.
+insert into public.sius_users (user_id, email)
+select users.id, lower(btrim(users.email))
+from auth.users as users
+where users.email is not null and btrim(users.email) <> ''
+on conflict (user_id) do update set
+    email = excluded.email,
+    updated_at = now();
+
+create or replace function private.sius_is_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+    select exists (
+        select 1
+        from public.sius_users as users
+        where users.user_id = (select auth.uid())
+          and users.role = 'admin'
+    );
+$$;
+
+create or replace function private.sius_can_read_shot(
+    p_range_id text,
+    p_member_number text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+    select private.sius_is_admin()
+       or exists (
+            select 1
+            from public.sius_member_access as access
+            where access.user_id = (select auth.uid())
+              and access.range_id = p_range_id
+              and access.member_number = p_member_number
+              and access.status = 'approved'
+       );
+$$;
+
+create or replace function private.sius_validate_access_transition()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+    caller_id uuid := auth.uid();
+    caller_is_admin boolean := private.sius_is_admin();
+begin
+    if new.id <> old.id
+       or new.user_id <> old.user_id
+       or new.range_id <> old.range_id
+       or new.member_number <> old.member_number
+       or new.requested_at <> old.requested_at then
+        raise exception 'member access identity fields are immutable';
+    end if;
+
+    -- SQL editor and service-role maintenance have no end-user JWT. RLS still
+    -- prevents ordinary callers from reaching this branch.
+    if caller_id is null then
+        return new;
+    end if;
+
+    if caller_is_admin then
+        if not (
+            (old.status = 'pending' and new.status in ('approved', 'rejected'))
+            or (old.status = 'approved' and new.status = 'revoked')
+            or (old.status in ('rejected', 'revoked') and new.status = 'approved')
+        ) then
+            raise exception 'invalid administrator access transition: % to %',
+                old.status, new.status;
+        end if;
+        new.reviewed_at := now();
+        new.reviewed_by := caller_id;
+        return new;
+    end if;
+
+    if old.user_id <> caller_id
+       or old.status <> 'rejected'
+       or new.status <> 'pending' then
+        raise exception 'users may only resubmit their own rejected request';
+    end if;
+    new.reviewed_at := null;
+    new.reviewed_by := null;
+    return new;
+end;
+$$;
+
+drop trigger if exists sius_validate_access_transition
+    on public.sius_member_access;
+create trigger sius_validate_access_transition
+before update on public.sius_member_access
+for each row execute function private.sius_validate_access_transition();
+
 create table if not exists public.sius_projection_state (
     name text primary key check (btrim(name) <> ''),
     normalizer_version text not null,
@@ -708,6 +870,8 @@ alter table public.sius_raw_events enable row level security;
 alter table public.sius_sessions enable row level security;
 alter table public.sius_phases enable row level security;
 alter table public.sius_shots enable row level security;
+alter table public.sius_users enable row level security;
+alter table public.sius_member_access enable row level security;
 alter table public.sius_projection_state enable row level security;
 alter table public.sius_projection_lane_state enable row level security;
 alter table public.sius_projection_errors enable row level security;
@@ -716,6 +880,8 @@ revoke all on table public.sius_raw_events from anon, authenticated;
 revoke all on table public.sius_sessions from anon, authenticated;
 revoke all on table public.sius_phases from anon, authenticated;
 revoke all on table public.sius_shots from anon, authenticated;
+revoke all on table public.sius_users from anon, authenticated;
+revoke all on table public.sius_member_access from anon, authenticated;
 revoke all on table public.sius_projection_state from anon, authenticated;
 revoke all on table public.sius_projection_lane_state from anon, authenticated;
 revoke all on table public.sius_projection_errors from anon, authenticated;
@@ -732,10 +898,88 @@ revoke execute on function public.sius_commit_projection_batch(
     jsonb
 ) from public, anon, authenticated;
 
+drop policy if exists sius_users_select_own on public.sius_users;
+create policy sius_users_select_own
+on public.sius_users
+for select
+to authenticated
+using (user_id = (select auth.uid()));
+
+drop policy if exists sius_users_select_admin on public.sius_users;
+create policy sius_users_select_admin
+on public.sius_users
+for select
+to authenticated
+using ((select private.sius_is_admin()));
+
+drop policy if exists sius_member_access_select_own
+    on public.sius_member_access;
+create policy sius_member_access_select_own
+on public.sius_member_access
+for select
+to authenticated
+using (user_id = (select auth.uid()));
+
+drop policy if exists sius_member_access_select_admin
+    on public.sius_member_access;
+create policy sius_member_access_select_admin
+on public.sius_member_access
+for select
+to authenticated
+using ((select private.sius_is_admin()));
+
+drop policy if exists sius_member_access_insert_own
+    on public.sius_member_access;
+create policy sius_member_access_insert_own
+on public.sius_member_access
+for insert
+to authenticated
+with check (
+    user_id = (select auth.uid())
+    and status = 'pending'
+    and reviewed_at is null
+    and reviewed_by is null
+);
+
+drop policy if exists sius_member_access_resubmit_own
+    on public.sius_member_access;
+create policy sius_member_access_resubmit_own
+on public.sius_member_access
+for update
+to authenticated
+using (
+    user_id = (select auth.uid())
+    and status = 'rejected'
+)
+with check (
+    user_id = (select auth.uid())
+    and status = 'pending'
+);
+
+drop policy if exists sius_member_access_update_admin
+    on public.sius_member_access;
+create policy sius_member_access_update_admin
+on public.sius_member_access
+for update
+to authenticated
+using ((select private.sius_is_admin()))
+with check ((select private.sius_is_admin()));
+
+drop policy if exists sius_shots_select_authorized
+    on public.sius_shots;
+create policy sius_shots_select_authorized
+on public.sius_shots
+for select
+to authenticated
+using (private.sius_can_read_shot(range_id, shooter_number));
+
 grant select, insert, update on table public.sius_raw_events to service_role;
 grant select, insert, update on table public.sius_sessions to service_role;
 grant select, insert, update on table public.sius_phases to service_role;
 grant select, insert, update on table public.sius_shots to service_role;
+grant select, insert, update, delete on table public.sius_users to service_role;
+grant select, insert, update, delete
+    on table public.sius_member_access to service_role;
 grant select, insert, update on table public.sius_projection_state to service_role;
 grant select, insert, update on table public.sius_projection_lane_state to service_role;
 grant select, insert, update on table public.sius_projection_errors to service_role;
@@ -750,5 +994,46 @@ grant execute on function public.sius_commit_projection_batch(
     integer,
     jsonb
 ) to service_role;
+
+grant select on table public.sius_users to authenticated;
+grant select on table public.sius_member_access to authenticated;
+grant insert (user_id, range_id, member_number)
+    on table public.sius_member_access to authenticated;
+grant update (status)
+    on table public.sius_member_access to authenticated;
+grant select (
+    shot_key,
+    session_id,
+    phase_id,
+    range_id,
+    lane_number,
+    shooter_number,
+    received_at,
+    device_time_text,
+    annual_ticks,
+    event_sequence,
+    phase_kind,
+    shot_number,
+    score_integer,
+    score_tenths,
+    primary_score_raw,
+    secondary_score_raw,
+    x_native,
+    y_native
+) on table public.sius_shots to authenticated;
+
+revoke all on schema private from public, anon, authenticated;
+grant usage on schema private to authenticated;
+revoke execute on function private.sius_is_admin()
+    from public, anon, authenticated;
+revoke execute on function private.sius_can_read_shot(text, text)
+    from public, anon, authenticated;
+revoke execute on function private.sius_sync_auth_user()
+    from public, anon, authenticated;
+revoke execute on function private.sius_validate_access_transition()
+    from public, anon, authenticated;
+grant execute on function private.sius_is_admin() to authenticated;
+grant execute on function private.sius_can_read_shot(text, text)
+    to authenticated;
 
 notify pgrst, 'reload schema';

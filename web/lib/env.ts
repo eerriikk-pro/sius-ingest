@@ -2,15 +2,18 @@ import "server-only";
 
 export interface ViewerEnvironment {
   supabaseUrl: string;
-  supabaseSecretKey: string;
-  rangeId?: string;
+  supabasePublishableKey: string;
+  rangeId: string;
   timezone: string;
 }
 
 export function getViewerEnvironment(): ViewerEnvironment {
-  const supabaseUrl = process.env.SUPABASE_URL?.trim();
-  const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY?.trim();
-  const rangeId = process.env.SIUS_RANGE_ID?.trim() || undefined;
+  const supabaseUrl =
+    process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ||
+    process.env.SUPABASE_URL?.trim();
+  const supabasePublishableKey =
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim();
+  const rangeId = process.env.SIUS_RANGE_ID?.trim();
   const timezone =
     process.env.SIUS_VIEWER_TIMEZONE?.trim() || "America/Vancouver";
 
@@ -20,11 +23,11 @@ export function getViewerEnvironment(): ViewerEnvironment {
   if (!supabaseUrl.startsWith("https://") && !supabaseUrl.startsWith("http://")) {
     throw new Error("SUPABASE_URL must start with http:// or https://");
   }
-  if (!supabaseSecretKey) {
-    throw new Error("SUPABASE_SECRET_KEY is not configured");
+  if (!supabasePublishableKey) {
+    throw new Error("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY is not configured");
   }
-  if (supabaseSecretKey.startsWith("sb_publishable_")) {
-    throw new Error("The viewer requires a server-side Supabase secret key");
+  if (!rangeId) {
+    throw new Error("SIUS_RANGE_ID is not configured");
   }
 
   try {
@@ -35,7 +38,7 @@ export function getViewerEnvironment(): ViewerEnvironment {
 
   return {
     supabaseUrl: supabaseUrl.replace(/\/+$/, ""),
-    supabaseSecretKey,
+    supabasePublishableKey,
     rangeId,
     timezone,
   };
