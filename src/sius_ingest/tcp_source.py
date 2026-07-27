@@ -4,15 +4,20 @@ import socket
 from collections.abc import Iterator
 from dataclasses import dataclass
 from threading import Event
+from time import monotonic
 from uuid import uuid4
 
 from sius_ingest.models import (
     ConnectionClosed,
+    ConnectionHealth,
     ConnectionOpened,
     SourceEvent,
     TcpChunk,
 )
 from sius_ingest.time_utils import utc_now
+
+DEFAULT_IDLE_RECONNECT_SECONDS = 10 * 60.0
+DEFAULT_HEALTH_INTERVAL_SECONDS = 5 * 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +29,12 @@ class TcpSourceConfig:
     receive_poll_interval: float = 1.0
     receive_size: int = 64 * 1024
     reconnect: bool = True
+    idle_reconnect_seconds: float | None = DEFAULT_IDLE_RECONNECT_SECONDS
+    health_interval_seconds: float | None = DEFAULT_HEALTH_INTERVAL_SECONDS
+    tcp_keepalive: bool = True
+    keepalive_idle_seconds: int = 60
+    keepalive_interval_seconds: int = 10
+    keepalive_probe_count: int = 3
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -38,6 +49,16 @@ class TcpSourceConfig:
             raise ValueError("receive_poll_interval must be positive")
         if self.receive_size <= 0:
             raise ValueError("receive_size must be positive")
+        if self.idle_reconnect_seconds is not None and self.idle_reconnect_seconds <= 0:
+            raise ValueError("idle_reconnect_seconds must be positive or None")
+        if self.health_interval_seconds is not None and self.health_interval_seconds <= 0:
+            raise ValueError("health_interval_seconds must be positive or None")
+        if self.keepalive_idle_seconds <= 0:
+            raise ValueError("keepalive_idle_seconds must be positive")
+        if self.keepalive_interval_seconds <= 0:
+            raise ValueError("keepalive_interval_seconds must be positive")
+        if self.keepalive_probe_count <= 0:
+            raise ValueError("keepalive_probe_count must be positive")
 
 
 class TcpSource:
@@ -57,6 +78,8 @@ class TcpSource:
                     (self._config.host, self._config.port),
                     timeout=self._config.connect_timeout,
                 ) as client:
+                    if self._config.tcp_keepalive:
+                        _configure_tcp_keepalive(client, self._config)
                     client.settimeout(self._config.receive_poll_interval)
                     local_address = _socket_address(client.getsockname())
                     peer_address = _socket_address(client.getpeername())
@@ -69,10 +92,40 @@ class TcpSource:
                     )
 
                     sequence = 0
+                    last_data_at = monotonic()
+                    next_health_at = _next_health_at(last_data_at, self._config)
                     while not stop.is_set():
                         try:
                             data = client.recv(self._config.receive_size)
                         except TimeoutError:
+                            now = monotonic()
+                            idle_seconds = max(0.0, now - last_data_at)
+                            if (
+                                self._config.idle_reconnect_seconds is not None
+                                and idle_seconds >= self._config.idle_reconnect_seconds
+                            ):
+                                yield ConnectionClosed(
+                                    connection_id=connection_id,
+                                    occurred_at=utc_now(),
+                                    error=(
+                                        "stale stream watchdog: no TCP data for "
+                                        f"{idle_seconds:.0f} seconds"
+                                    ),
+                                    will_reconnect=self._config.reconnect,
+                                )
+                                break
+                            if next_health_at is not None and now >= next_health_at:
+                                yield ConnectionHealth(
+                                    connection_id=connection_id,
+                                    occurred_at=utc_now(),
+                                    idle_seconds=idle_seconds,
+                                    reconnect_after_seconds=(self._config.idle_reconnect_seconds),
+                                )
+                                next_health_at = _advance_health_at(
+                                    next_health_at,
+                                    now,
+                                    self._config,
+                                )
                             continue
 
                         if not data:
@@ -85,6 +138,8 @@ class TcpSource:
                             break
 
                         sequence += 1
+                        last_data_at = monotonic()
+                        next_health_at = _next_health_at(last_data_at, self._config)
                         yield TcpChunk(
                             connection_id=connection_id,
                             sequence=sequence,
@@ -119,3 +174,56 @@ def _socket_address(value: tuple[object, ...]) -> tuple[str, int]:
     """Normalize the leading host and port fields returned by a socket."""
 
     return str(value[0]), int(value[1])
+
+
+def _next_health_at(started_at: float, config: TcpSourceConfig) -> float | None:
+    if config.health_interval_seconds is None:
+        return None
+    return started_at + config.health_interval_seconds
+
+
+def _advance_health_at(
+    previous: float,
+    now: float,
+    config: TcpSourceConfig,
+) -> float | None:
+    interval = config.health_interval_seconds
+    if interval is None:
+        return None
+    elapsed_intervals = int(max(0.0, now - previous) // interval) + 1
+    return previous + (elapsed_intervals * interval)
+
+
+def _configure_tcp_keepalive(client: socket.socket, config: TcpSourceConfig) -> None:
+    """Enable best-effort platform keepalive without rejecting a usable socket."""
+
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+    windows_ioctl = getattr(socket, "SIO_KEEPALIVE_VALS", None)
+    if windows_ioctl is not None and hasattr(client, "ioctl"):
+        try:
+            client.ioctl(
+                windows_ioctl,
+                (
+                    1,
+                    config.keepalive_idle_seconds * 1000,
+                    config.keepalive_interval_seconds * 1000,
+                ),
+            )
+        except OSError:
+            pass
+        return
+
+    for option_name, value in (
+        ("TCP_KEEPIDLE", config.keepalive_idle_seconds),
+        ("TCP_KEEPALIVE", config.keepalive_idle_seconds),
+        ("TCP_KEEPINTVL", config.keepalive_interval_seconds),
+        ("TCP_KEEPCNT", config.keepalive_probe_count),
+    ):
+        option = getattr(socket, option_name, None)
+        if option is None:
+            continue
+        try:
+            client.setsockopt(socket.IPPROTO_TCP, option, value)
+        except OSError:
+            pass

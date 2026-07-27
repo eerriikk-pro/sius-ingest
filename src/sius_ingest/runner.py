@@ -9,8 +9,19 @@ from uuid import UUID
 
 from sius_ingest.capture import CaptureWriter, create_capture_directory
 from sius_ingest.framing import NewlineFramer
-from sius_ingest.models import ConnectionClosed, ConnectionOpened, FramedRecord, TcpChunk
-from sius_ingest.tcp_source import TcpSource, TcpSourceConfig
+from sius_ingest.models import (
+    ConnectionClosed,
+    ConnectionHealth,
+    ConnectionOpened,
+    FramedRecord,
+    TcpChunk,
+)
+from sius_ingest.tcp_source import (
+    DEFAULT_HEALTH_INTERVAL_SECONDS,
+    DEFAULT_IDLE_RECONNECT_SECONDS,
+    TcpSource,
+    TcpSourceConfig,
+)
 from sius_ingest.time_utils import isoformat_utc, utc_now
 
 RecordHandler = Callable[[FramedRecord], str | None]
@@ -25,6 +36,8 @@ class LiveRunnerConfig:
     reconnect_delay: float = 2.0
     reconnect: bool = True
     print_records: bool = True
+    idle_reconnect_seconds: float | None = DEFAULT_IDLE_RECONNECT_SECONDS
+    health_interval_seconds: float | None = DEFAULT_HEALTH_INTERVAL_SECONDS
 
 
 def run_live_stream(
@@ -44,6 +57,8 @@ def run_live_stream(
             connect_timeout=config.connect_timeout,
             reconnect_delay=config.reconnect_delay,
             reconnect=config.reconnect,
+            idle_reconnect_seconds=config.idle_reconnect_seconds,
+            health_interval_seconds=config.health_interval_seconds,
         )
     )
     framer = NewlineFramer()
@@ -77,6 +92,18 @@ def run_live_stream(
                             print_record=config.print_records,
                             record_handler=record_handler,
                         )
+                elif isinstance(event, ConnectionHealth):
+                    reconnect_detail = (
+                        "disabled"
+                        if event.reconnect_after_seconds is None
+                        else f"{event.reconnect_after_seconds:.0f}s"
+                    )
+                    print(
+                        f"[{isoformat_utc(event.occurred_at)}] connection open but idle "
+                        f"id={event.connection_id} idle={event.idle_seconds:.0f}s "
+                        f"watchdog={reconnect_detail}",
+                        flush=True,
+                    )
                 elif isinstance(event, ConnectionClosed):
                     partial = framer.finish()
                     if partial:

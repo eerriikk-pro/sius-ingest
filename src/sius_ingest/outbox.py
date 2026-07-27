@@ -13,6 +13,7 @@ from typing import Any
 from sius_ingest.keys import observation_key, shot_key, stable_event_key
 from sius_ingest.models import (
     FramedRecord,
+    GenericMessage,
     IngestResult,
     LaneState,
     OutboxItem,
@@ -95,6 +96,32 @@ class SQLiteEventStore(AbstractContextManager["SQLiteEventStore"]):
 
         with self._connection:
             cursor = self._connection.cursor()
+            if (
+                not project_locally
+                and _is_replay_suppressible(message)
+                and _stable_event_exists(cursor, stable_event_key_value)
+            ):
+                if isinstance(message, ShotMessage):
+                    return _result(
+                        observation_inserted=False,
+                        message_type=message_type,
+                        parse_error=parse_error,
+                        shot_duplicate=True,
+                        shot_key=stable_event_key_value,
+                        lane_number=message.lane_number,
+                        shooter_number=message.shooter_number,
+                        shot_kind=message.shot_kind,
+                        shot_number=message.shot_number,
+                        score_tenths=message.score_tenths,
+                    )
+                return _result(
+                    observation_inserted=False,
+                    message_type=message_type,
+                    parse_error=parse_error,
+                    lane_number=lane_number,
+                    shooter_number=shooter_number,
+                )
+
             cursor.execute(
                 """
                 INSERT OR IGNORE INTO raw_events (
@@ -889,6 +916,22 @@ def _message_type(message: ParsedMessage | None, raw: bytes) -> str | None:
         return message.record_type
     prefix = raw.split(b";", 1)[0].decode("latin-1", errors="replace")
     return prefix or None
+
+
+def _is_replay_suppressible(message: ParsedMessage | None) -> bool:
+    """Return whether a stable key reliably identifies one logical event."""
+
+    return isinstance(message, ShotMessage) or (
+        isinstance(message, GenericMessage) and message.event_sequence is not None
+    )
+
+
+def _stable_event_exists(cursor: sqlite3.Cursor, stable_event_key_value: str) -> bool:
+    row = cursor.execute(
+        "SELECT 1 FROM raw_events WHERE stable_event_key = ? LIMIT 1",
+        (stable_event_key_value,),
+    ).fetchone()
+    return row is not None
 
 
 def _lane_number(message: ParsedMessage | None) -> int | None:

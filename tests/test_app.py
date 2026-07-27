@@ -7,11 +7,14 @@ from threading import Event
 from unittest.mock import patch
 
 from sius_ingest.app import (
+    _disableable_seconds,
     _effective_argv,
+    _format_ingest_result,
     _resolve_secret_key,
     _run_combined,
     build_parser,
 )
+from sius_ingest.models import IngestResult, ShotKind
 
 
 class EffectiveArgumentsTests(unittest.TestCase):
@@ -50,6 +53,34 @@ class EffectiveArgumentsTests(unittest.TestCase):
         self.assertEqual(args.page_size, 500)
         self.assertFalse(hasattr(args, "database"))
         self.assertFalse(hasattr(args, "watch"))
+
+    def test_live_capture_enables_self_healing_defaults(self) -> None:
+        args = build_parser().parse_args(["run"])
+
+        self.assertEqual(args.idle_reconnect_seconds, 600)
+        self.assertEqual(args.health_interval_seconds, 300)
+
+    def test_zero_disables_an_optional_live_interval(self) -> None:
+        self.assertIsNone(_disableable_seconds(0, "--example"))
+
+    def test_duplicate_replay_does_not_flood_the_console(self) -> None:
+        result = IngestResult(
+            observation_inserted=False,
+            message_type="_SHOT",
+            parse_error=None,
+            shot_inserted=False,
+            shot_duplicate=True,
+            shot_key="shot-1",
+            lane_number=7,
+            shooter_number="576",
+            shot_kind=ShotKind.MATCH,
+            shot_number=26,
+            score_tenths=99,
+            session_id=None,
+            phase_id=None,
+        )
+
+        self.assertIsNone(_format_ingest_result(result))
 
     def test_secret_key_can_be_read_from_masked_prompt(self) -> None:
         args = Namespace(prompt_secret_key=True, secret_key=None)

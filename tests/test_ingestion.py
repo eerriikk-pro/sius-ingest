@@ -46,6 +46,82 @@ class IngestionServiceTests(unittest.TestCase):
         self.assertEqual(status.pending_raw_uploads, 1)
         self.assertEqual(status.pending_projection_uploads, 0)
 
+    def test_raw_only_mode_suppresses_a_shot_replayed_on_a_new_connection(self) -> None:
+        with TemporaryDirectory() as temporary:
+            database = Path(temporary) / "sius.sqlite3"
+            with SQLiteEventStore(database) as store:
+                service = IngestionService(
+                    store=store,
+                    config=IngestionConfig(
+                        range_id="range-a",
+                        project_locally=False,
+                        enqueue_raw_upload=True,
+                    ),
+                )
+                raw = shot_line(
+                    event_sequence=8,
+                    shot_flags=7,
+                    score_tenths=99,
+                    shot_number=3,
+                    annual_ticks=1008,
+                )
+                original = service.process(framed_record(raw, sequence=8))
+                replay = service.process(
+                    framed_record(
+                        raw,
+                        sequence=1,
+                        connection_id=UUID("00000000-0000-0000-0000-000000000002"),
+                    )
+                )
+                status = store.status()
+
+        self.assertTrue(original.observation_inserted)
+        self.assertFalse(replay.observation_inserted)
+        self.assertTrue(replay.shot_duplicate)
+        self.assertEqual(status.raw_events, 1)
+        self.assertEqual(status.pending_raw_uploads, 1)
+
+    def test_raw_only_mode_only_suppresses_generic_events_with_stable_counters(self) -> None:
+        diagnostic = b"_DIAG;5;6;0;60;12;17:15:20.46;11;0;0;1768803440"
+        stateless_total = b"_TOTL;5;6;0;103;T;0;0;Q;0;0;S;0;0;"
+        second_connection = UUID("00000000-0000-0000-0000-000000000002")
+
+        with TemporaryDirectory() as temporary:
+            database = Path(temporary) / "sius.sqlite3"
+            with SQLiteEventStore(database) as store:
+                service = IngestionService(
+                    store=store,
+                    config=IngestionConfig(
+                        range_id="range-a",
+                        project_locally=False,
+                        enqueue_raw_upload=True,
+                    ),
+                )
+                diagnostic_original = service.process(framed_record(diagnostic, sequence=1))
+                diagnostic_replay = service.process(
+                    framed_record(
+                        diagnostic,
+                        sequence=1,
+                        connection_id=second_connection,
+                    )
+                )
+                total_original = service.process(framed_record(stateless_total, sequence=2))
+                total_repeat = service.process(
+                    framed_record(
+                        stateless_total,
+                        sequence=2,
+                        connection_id=second_connection,
+                    )
+                )
+                status = store.status()
+
+        self.assertTrue(diagnostic_original.observation_inserted)
+        self.assertFalse(diagnostic_replay.observation_inserted)
+        self.assertTrue(total_original.observation_inserted)
+        self.assertTrue(total_repeat.observation_inserted)
+        self.assertEqual(status.raw_events, 3)
+        self.assertEqual(status.pending_raw_uploads, 3)
+
     def test_persists_deduplicates_and_segments_controlled_sequence(self) -> None:
         with TemporaryDirectory() as temporary:
             database = Path(temporary) / "sius.sqlite3"

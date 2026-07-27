@@ -18,6 +18,10 @@ from sius_ingest.remote_projection import SupabaseProjectionRepository
 from sius_ingest.remote_source import SupabaseRawEventSource
 from sius_ingest.replay_source import ReplaySource
 from sius_ingest.runner import LiveRunnerConfig, run_live_stream
+from sius_ingest.tcp_source import (
+    DEFAULT_HEALTH_INTERVAL_SECONDS,
+    DEFAULT_IDLE_RECONNECT_SECONDS,
+)
 from sius_ingest.uploader import SupabaseConfig, SupabaseUploader
 
 DEFAULT_DATABASE = Path(os.getenv("SIUS_DATABASE", "data/sius-raw.sqlite3"))
@@ -170,6 +174,14 @@ def _run_live(args: argparse.Namespace) -> int:
                 reconnect_delay=args.reconnect_delay,
                 reconnect=not args.once,
                 print_records=args.verbose_records,
+                idle_reconnect_seconds=_disableable_seconds(
+                    args.idle_reconnect_seconds,
+                    "--idle-reconnect-seconds",
+                ),
+                health_interval_seconds=_disableable_seconds(
+                    args.health_interval_seconds,
+                    "--health-interval-seconds",
+                ),
             ),
             record_handler=ingest_record,
         )
@@ -400,6 +412,30 @@ def _add_live_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--connect-timeout", type=float, default=5.0)
     parser.add_argument("--reconnect-delay", type=float, default=2.0)
+    parser.add_argument(
+        "--idle-reconnect-seconds",
+        type=float,
+        default=_env_float(
+            "SIUS_IDLE_RECONNECT_SECONDS",
+            DEFAULT_IDLE_RECONNECT_SECONDS,
+        ),
+        help=(
+            "reconnect an open stream after this many seconds without TCP data "
+            f"(default: {DEFAULT_IDLE_RECONNECT_SECONDS:.0f}; 0 disables)"
+        ),
+    )
+    parser.add_argument(
+        "--health-interval-seconds",
+        type=float,
+        default=_env_float(
+            "SIUS_HEALTH_INTERVAL_SECONDS",
+            DEFAULT_HEALTH_INTERVAL_SECONDS,
+        ),
+        help=(
+            "report an idle connection at this interval "
+            f"(default: {DEFAULT_HEALTH_INTERVAL_SECONDS:.0f}; 0 disables)"
+        ),
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument(
         "--verbose-records",
@@ -440,10 +476,7 @@ def _format_ingest_result(result: IngestResult) -> str | None:
     if result.parse_error:
         return f"parse error type={result.message_type}: {result.parse_error}"
     if result.shot_duplicate:
-        return (
-            f"duplicate shot ignored lane={result.lane_number} "
-            f"kind={result.shot_kind} number={result.shot_number}"
-        )
+        return None
     if result.shot_kind is None:
         return None
 
@@ -477,6 +510,22 @@ def _env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer") from exc
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+
+
+def _disableable_seconds(value: float, argument_name: str) -> float | None:
+    if value < 0:
+        raise SystemExit(f"{argument_name} must not be negative")
+    return value or None
 
 
 if __name__ == "__main__":

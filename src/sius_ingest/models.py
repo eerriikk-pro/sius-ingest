@@ -31,6 +31,16 @@ class TcpChunk:
 
 
 @dataclass(frozen=True, slots=True)
+class ConnectionHealth:
+    """Periodic status information for an open but currently idle stream."""
+
+    connection_id: UUID
+    occurred_at: datetime
+    idle_seconds: float
+    reconnect_after_seconds: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class ConnectionClosed:
     """A connection ended or a connection attempt failed."""
 
@@ -40,7 +50,7 @@ class ConnectionClosed:
     will_reconnect: bool
 
 
-SourceEvent: TypeAlias = ConnectionOpened | TcpChunk | ConnectionClosed
+SourceEvent: TypeAlias = ConnectionOpened | TcpChunk | ConnectionHealth | ConnectionClosed
 
 
 @dataclass(frozen=True, slots=True)

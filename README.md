@@ -12,12 +12,13 @@ data. Both programs use only the Python standard library at runtime.
 
 ## Current behavior
 
-- reconnects to SIUSData automatically;
+- reconnects after socket errors and after 10 minutes without any TCP data;
+- enables TCP keepalive and reports open-but-idle connections every 5 minutes;
 - starts raw collection and background upload together when double-clicked;
 - writes a lossless capture for future protocol analysis;
 - retains every received record locally, including unknown and malformed ones;
-- preserves SIUSData connection backlogs as raw observations while deduplicating
-  their canonical shots;
+- suppresses stable shot and counter-event replays in the SQLite outbox while
+  preserving the exact repeated bytes in the lossless capture;
 - uploads only `sius_raw_events` from the range PC;
 - keeps upload retry state in SQLite across restarts and internet outages;
 - lets an external normalizer parse `_SHOT` and `_SHID` records;
@@ -72,7 +73,7 @@ assets do not require a GitHub login.
 
 Maintainers can also open the repository's **Actions** tab, select
 **Build Windows executable**, and manually build any branch, tag, or commit.
-Providing a matching `release_tag` such as `v0.4.0` creates or updates the public
+Providing a matching `release_tag` such as `v0.4.1` creates or updates the public
 release assets.
 
 The workflow is manual-only; it does not run for pushes or pull requests. The
@@ -102,6 +103,14 @@ Launching without arguments is equivalent to `run`. It uses
 `data\sius-raw.sqlite3`, and capture directory `captures\`. If either Supabase
 setting is missing, it clearly reports that upload is disabled and continues
 collecting locally.
+
+SIUSData can occasionally leave a TCP client connected while silently stopping
+its data feed. The collector prints an idle health line after five minutes and
+automatically replaces the connection after ten minutes without any TCP bytes.
+SIUSData may replay its current backlog after reconnecting; stable shot and
+counter records already seen by the raw bridge are not queued or uploaded
+again. Set `SIUS_IDLE_RECONNECT_SECONDS=0` only when deliberately disabling
+this safety mechanism.
 
 Upgrading the executable does not replace `.env`, `captures/`, or
 `data/sius-raw.sqlite3`. Stop the old process, replace only the executable and
@@ -324,10 +333,10 @@ contains:
 The external normalizer additionally retains athlete sessions, sighter/match
 phases, scores, raw score fields, shot flags, coordinates, and the full parsed
 `_SHOT` payload. These tables are projections: raw events remain the source of
-truth. Canonical shots from backlog retransmissions are deduplicated while the
-raw observations remain available for auditing. Every exact TCP chunk also
-remains available in the range PC's SQLite database and lossless capture
-directory.
+truth. Canonical shots from backlog retransmissions are deduplicated. The first
+stable raw event remains in SQLite and Supabase, while every exact TCP byte
+received—including repeated backlog observations—remains in the range PC's
+lossless capture directory.
 
 ## Configuration
 
@@ -340,6 +349,8 @@ Frequently used options have environment-variable equivalents:
 | `SIUS_OUTPUT` | `captures` | lossless capture parent directory |
 | `SIUS_DATABASE` | `data/sius-raw.sqlite3` | range-PC raw outbox |
 | `SIUS_RANGE_ID` | `default-range` | stable range identifier |
+| `SIUS_IDLE_RECONNECT_SECONDS` | `600` | replace a silent TCP stream; `0` disables |
+| `SIUS_HEALTH_INTERVAL_SECONDS` | `300` | idle connection log interval; `0` disables |
 | `SIUS_VIEWER_TIMEZONE` | `America/Vancouver` | local viewer display timezone |
 | `SUPABASE_URL` | none | Supabase project URL |
 | `SUPABASE_SECRET_KEY` | none | private `sb_secret_...` uploader credential |
