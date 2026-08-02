@@ -297,14 +297,15 @@ normalizer refuses to mix different projection versions silently.
 
 ## Run the local practice viewer
 
-The proof-of-concept viewer lives in [`web/`](web/). It looks up a firing
-number, accepts a configurable 1–365 day window, and displays normalized shots
-using the stored session, sighter-block, and match-relay boundaries. Match
-relays are not split at an arbitrary 60 shots.
+The authenticated viewer lives in [`web/`](web/). Members can sign in with
+Google or a confirmed email/password account, request access to one or more
+firing numbers, and review approved shot histories. Administrators approve,
+reject, restore, and revoke those many-to-many assignments in the viewer.
 
-The viewer reads the existing repository-level `.env` file. Its Next.js route
-handler queries Supabase on the server, so `SUPABASE_SECRET_KEY` is never sent
-to browser code.
+The viewer uses Supabase cookie-based Auth and row-level security. Its Next.js
+route queries Supabase with the signed-in user's JWT and the browser-safe
+publishable key. The ingestion `SUPABASE_SECRET_KEY` is never used for member
+reads or sent to browser code.
 
 ```bash
 cd web
@@ -312,10 +313,14 @@ npm install
 npm run dev
 ```
 
-Open <http://127.0.0.1:3000>, enter a member ID, and choose the number of days
-to inspect. `SIUS_RANGE_ID` is optional; when present, the viewer limits results
-to that range. `SIUS_VIEWER_TIMEZONE` controls displayed dates and defaults to
-`America/Vancouver`.
+Open <http://127.0.0.1:3000> and sign in. `SIUS_RANGE_ID` is required and limits
+both approvals and results to that range. `SIUS_VIEWER_TIMEZONE` controls
+displayed dates and defaults to `America/Vancouver`.
+
+Before first use, apply [`supabase/schema.sql`](supabase/schema.sql) and follow
+the complete [member authentication setup](docs/member-auth-setup.md) for
+Google OAuth, Google Workspace SMTP relay, Turnstile, redirect URLs, and initial
+administrator promotion.
 
 The target display uses the scale inferred from the controlled SIUS capture:
 native X/Y coordinates are multiplied by 1000 to plot millimetres. The raw
@@ -359,6 +364,10 @@ Frequently used options have environment-variable equivalents:
 | `SIUS_VIEWER_TIMEZONE` | `America/Vancouver` | local viewer display timezone |
 | `SUPABASE_URL` | none | Supabase project URL |
 | `SUPABASE_SECRET_KEY` | none | private `sb_secret_...` uploader credential |
+| `NEXT_PUBLIC_SUPABASE_URL` | none | browser-safe Supabase Auth URL |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | none | browser-safe Auth/Data API key |
+| `NEXT_PUBLIC_SITE_URL` | none | production viewer origin used by Auth |
+| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | none | Cloudflare CAPTCHA site key |
 
 Run `sius-ingest COMMAND --help` for all command-specific options.
 
@@ -384,8 +393,10 @@ External worker
 
 Local viewer
     Browser
-        -> server-only viewer API
-        -> Supabase sessions + phases + shots
+        -> Supabase Auth cookie
+        -> server-side viewer API with user JWT
+        -> PostgreSQL grants + row-level security
+        -> authorized sius_shots columns only
 ```
 
 Key modules:

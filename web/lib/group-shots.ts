@@ -55,6 +55,10 @@ export function groupMemberShots(
     session.phases.set(row.phase_id, phase);
     phase.shots.push(toActivityShot(row));
     phase.pistolEncodingObserved ||= row.secondary_score_raw > 0;
+    session.startedAt = earlier(session.startedAt, row.received_at);
+    session.lastActivityAt = later(session.lastActivityAt, row.received_at);
+    phase.startedAt = earlier(phase.startedAt, row.received_at);
+    phase.lastActivityAt = later(phase.lastActivityAt, row.received_at);
   }
 
   const groupedSessions = [...sessions.values()]
@@ -92,9 +96,9 @@ function createSession(row: SupabaseShotRow): MutableSession {
     id: row.session_id,
     rangeId: row.range_id,
     laneNumber: row.lane_number,
-    startedAt: row.session?.started_at ?? row.received_at,
-    lastActivityAt: row.session?.last_activity_at ?? row.received_at,
-    endedAt: row.session?.ended_at ?? null,
+    startedAt: row.received_at,
+    lastActivityAt: row.received_at,
+    endedAt: null,
     phases: new Map(),
   };
 }
@@ -103,19 +107,24 @@ function createPhase(row: SupabaseShotRow, kind: PhaseKind): MutablePhase {
   return {
     id: row.phase_id,
     kind,
-    ordinal: row.phase?.ordinal ?? 1,
-    startedAt: row.phase?.started_at ?? row.received_at,
-    lastActivityAt: row.phase?.last_activity_at ?? row.received_at,
-    endedAt: row.phase?.ended_at ?? null,
+    ordinal: 0,
+    startedAt: row.received_at,
+    lastActivityAt: row.received_at,
+    endedAt: null,
     shots: [],
     pistolEncodingObserved: row.secondary_score_raw > 0,
   };
 }
 
 function finalizeSession(session: MutableSession): ActivitySession {
+  const counters: Record<PhaseKind, number> = { match: 0, sighter: 0 };
   const phases = [...session.phases.values()]
     .map(finalizePhase)
-    .sort(comparePhasesOldestFirst);
+    .sort(comparePhasesOldestFirst)
+    .map((phase) => ({
+      ...phase,
+      ordinal: ++counters[phase.kind],
+    }));
   const shots = phases.flatMap((phase) => phase.shots);
   return {
     id: session.id,
@@ -234,4 +243,12 @@ function finiteNumber(value: number | string, field: string): number {
     throw new Error(`${field} is not a finite number`);
   }
   return parsed;
+}
+
+function earlier(left: string, right: string): string {
+  return left.localeCompare(right) <= 0 ? left : right;
+}
+
+function later(left: string, right: string): string {
+  return left.localeCompare(right) >= 0 ? left : right;
 }

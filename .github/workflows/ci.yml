@@ -68,12 +68,33 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
-      - name: Create Supabase API roles
+      - name: Create Supabase API roles and auth stubs
         run: |
           psql -v ON_ERROR_STOP=1 <<'SQL'
           create role anon nologin;
           create role authenticated nologin;
           create role service_role nologin bypassrls;
+
+          create schema auth;
+          create table auth.users (
+              id uuid primary key,
+              email text
+          );
+          create function auth.uid()
+          returns uuid
+          language sql
+          stable
+          as $$
+              select nullif(
+                  current_setting('request.jwt.claim.sub', true),
+                  ''
+              )::uuid
+          $$;
+
+          grant usage on schema auth
+              to anon, authenticated, service_role;
+          grant execute on function auth.uid()
+              to anon, authenticated, service_role;
           SQL
       - run: psql -v ON_ERROR_STOP=1 -f supabase/schema.sql
       - run: psql -v ON_ERROR_STOP=1 -f supabase/test_projection.sql

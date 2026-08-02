@@ -1,5 +1,7 @@
 import "server-only";
 
+import type { SupabaseClient } from "@supabase/supabase-js";
+
 import { getViewerEnvironment } from "@/lib/env";
 import { groupMemberShots } from "@/lib/group-shots";
 import { fetchMemberShots } from "@/lib/supabase-rest";
@@ -33,6 +35,7 @@ export function parseDays(value: string | null): number {
 }
 
 export async function getMemberActivity(
+  supabase: SupabaseClient,
   memberId: string,
   days: number,
   now = new Date(),
@@ -40,7 +43,13 @@ export async function getMemberActivity(
   const environment = getViewerEnvironment();
   const to = new Date(now);
   const from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
-  const rows = await fetchMemberShots(environment, memberId, from, to);
+  const rows = await fetchMemberShots(
+    supabase,
+    environment.rangeId,
+    memberId,
+    from,
+    to,
+  );
   return groupMemberShots(rows, {
     memberId,
     days,

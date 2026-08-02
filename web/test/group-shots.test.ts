@@ -7,13 +7,12 @@ import type { SupabaseShotRow } from "../lib/supabase-rest.ts";
 const FROM = new Date("2026-07-18T12:00:00.000Z");
 const TO = new Date("2026-07-25T12:00:00.000Z");
 
-test("preserves persisted sighter and relay boundaries", () => {
+test("preserves shot phase boundaries and derives visible ordinals", () => {
   const rows = [
     shotRow({
       shotKey: "sighter-1",
       phaseId: "phase-sighter",
       phaseKind: "sighter",
-      phaseOrdinal: 2,
       shotNumber: 1,
       annualTicks: 100,
       scoreTenths: 96,
@@ -23,7 +22,6 @@ test("preserves persisted sighter and relay boundaries", () => {
         shotKey: `match-${index + 1}`,
         phaseId: "phase-match",
         phaseKind: "match",
-        phaseOrdinal: 1,
         shotNumber: index + 1,
         annualTicks: 200 + index,
         scoreTenths: 90 + (index % 10),
@@ -38,7 +36,7 @@ test("preserves persisted sighter and relay boundaries", () => {
     result.sessions[0].phases.map((phase) => phase.kind),
     ["sighter", "match"],
   );
-  assert.equal(result.sessions[0].phases[0].ordinal, 2);
+  assert.equal(result.sessions[0].phases[0].ordinal, 1);
   assert.equal(result.sessions[0].phases[1].shots.length, 13);
   assert.equal(result.summary.relayCount, 1);
   assert.equal(result.summary.sighterBlockCount, 1);
@@ -122,7 +120,6 @@ interface ShotOverrides {
   sessionId?: string;
   phaseId?: string;
   phaseKind?: "sighter" | "match";
-  phaseOrdinal?: number;
   shotNumber?: number;
   annualTicks?: number;
   eventSequence?: number;
@@ -155,19 +152,5 @@ function shotRow(overrides: ShotOverrides = {}): SupabaseShotRow {
     secondary_score_raw: overrides.secondaryScoreRaw ?? 0,
     x_native: overrides.xNative ?? "0.00314223",
     y_native: overrides.yNative ?? "0.00229864",
-    phase: {
-      id: overrides.phaseId ?? "phase-1",
-      phase_kind: phaseKind,
-      ordinal: overrides.phaseOrdinal ?? 1,
-      started_at: "2026-07-25T00:16:22.723Z",
-      last_activity_at: "2026-07-25T00:16:22.723Z",
-      ended_at: null,
-    },
-    session: {
-      id: overrides.sessionId ?? "session-1",
-      started_at: "2026-07-25T00:16:22.723Z",
-      last_activity_at: "2026-07-25T00:16:22.723Z",
-      ended_at: null,
-    },
   };
 }
