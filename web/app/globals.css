@@ -186,7 +186,6 @@ button {
 }
 
 .auth-intro h1,
-.auth-single-shell h1,
 .compact-header h1 {
   font-family: Georgia, "Times New Roman", serif;
   font-weight: 500;
@@ -270,32 +269,6 @@ button {
   padding: 24px;
 }
 
-.auth-tabs {
-  background: var(--cream);
-  border-radius: 11px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  margin-bottom: 18px;
-  padding: 4px;
-}
-
-.auth-tabs button {
-  background: transparent;
-  border: 0;
-  border-radius: 8px;
-  color: var(--muted-ink);
-  cursor: pointer;
-  font-size: 0.82rem;
-  font-weight: 760;
-  padding: 10px;
-}
-
-.auth-tabs .auth-tab-active {
-  background: var(--paper);
-  box-shadow: 0 2px 8px rgb(80 62 20 / 12%);
-  color: var(--ink);
-}
-
 .google-button {
   align-items: center;
   background: #fff;
@@ -315,42 +288,21 @@ button {
   border-color: var(--gold-deep);
 }
 
-.auth-divider {
-  align-items: center;
-  color: var(--muted-ink);
-  display: flex;
-  font-size: 0.7rem;
-  gap: 12px;
-  margin: 19px 0;
-  text-transform: uppercase;
-}
-
-.auth-divider::before,
-.auth-divider::after {
-  border-top: 1px solid var(--border);
-  content: "";
-  flex: 1;
-}
-
-.auth-form,
 .access-request-form {
   display: grid;
   gap: 14px;
 }
 
-.auth-form label,
 .access-request-form label {
   display: grid;
   gap: 7px;
 }
 
-.auth-form label span,
 .access-request-form label span {
   font-size: 0.75rem;
   font-weight: 760;
 }
 
-.auth-form input,
 .access-request-form input {
   background: #fffef9;
   border: 1px solid #cfc3a4;
@@ -361,27 +313,12 @@ button {
   width: 100%;
 }
 
-.auth-form input:focus,
 .access-request-form input:focus {
   border-color: var(--gold-deep);
   box-shadow: 0 0 0 3px rgb(228 185 47 / 20%);
 }
 
-.auth-submit {
-  width: 100%;
-}
-
-.auth-link {
-  color: var(--gold-deep);
-  display: block;
-  font-size: 0.8rem;
-  font-weight: 720;
-  margin-top: 16px;
-  text-align: center;
-}
-
 .auth-footnote,
-.auth-page-copy,
 .access-card > p,
 .no-access-card p,
 .muted-copy {
@@ -393,11 +330,6 @@ button {
   font-size: 0.74rem;
   margin: 16px 4px 0;
   text-align: center;
-}
-
-.turnstile-slot {
-  min-height: 65px;
-  overflow: hidden;
 }
 
 .form-message {
@@ -416,44 +348,8 @@ button {
   color: var(--match);
 }
 
-.auth-single-shell {
-  display: grid;
-  margin: 0 auto;
-  min-height: 100vh;
-  padding: 70px 24px;
-  place-items: center;
-}
-
-.auth-single-shell > section {
-  max-width: 480px;
-  width: 100%;
-}
-
-.auth-single-shell h1 {
-  font-size: 3rem;
-  line-height: 1;
-  margin: 10px 0 16px;
-}
-
-.auth-page-copy {
-  margin: 0 0 24px;
-}
-
-.confirmation-panel {
-  text-align: center;
-}
-
-.confirmation-panel h2 {
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 2rem;
-  font-weight: 500;
-  margin: 0 0 10px;
-}
-
-.confirmation-panel p {
-  color: var(--muted-ink);
-  line-height: 1.55;
-  margin: 0 0 20px;
+.auth-message {
+  margin-top: 16px;
 }
 
 .button-link {

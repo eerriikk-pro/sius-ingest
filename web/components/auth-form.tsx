@@ -1,104 +1,16 @@
 "use client";
 
-import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, useCallback, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { useState } from "react";
 
-import { TurnstileWidget } from "@/components/turnstile-widget";
 import { createClient } from "@/lib/supabase/client";
-
-type AuthMode = "login" | "signup";
 
 export function AuthForm() {
   const searchParams = useSearchParams();
-  const router = useRouter();
-  const [mode, setMode] = useState<AuthMode>(
-    searchParams.get("mode") === "signup" ? "signup" : "login",
-  );
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirmation, setConfirmation] = useState("");
-  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
-  const [captchaResetKey, setCaptchaResetKey] = useState(0);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(
     searchParams.get("error"),
   );
-  const [success, setSuccess] = useState(false);
-  const onCaptchaTokenChange = useCallback(
-    (token: string | null) => setCaptchaToken(token),
-    [],
-  );
-
-  function changeMode(nextMode: AuthMode) {
-    setMode(nextMode);
-    setMessage(null);
-    setSuccess(false);
-    setPassword("");
-    setConfirmation("");
-  }
-
-  async function handleEmail(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setMessage(null);
-    setSuccess(false);
-
-    if (mode === "signup") {
-      if (password.length < 8) {
-        setMessage("Use a password with at least 8 characters.");
-        return;
-      }
-      if (password !== confirmation) {
-        setMessage("The passwords do not match.");
-        return;
-      }
-    }
-
-    setLoading(true);
-    try {
-      const supabase = createClient();
-      const siteUrl = (
-        process.env.NEXT_PUBLIC_SITE_URL || window.location.origin
-      ).replace(/\/+$/, "");
-      if (mode === "signup") {
-        const { error } = await supabase.auth.signUp({
-          email: email.trim(),
-          password,
-          options: {
-            captchaToken: captchaToken ?? undefined,
-            emailRedirectTo: `${siteUrl}/auth/callback`,
-          },
-        });
-        if (error) {
-          throw error;
-        }
-        setSuccess(true);
-        setMessage(
-          "Check your email to confirm your account, then return here to sign in.",
-        );
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({
-          email: email.trim(),
-          password,
-          options: {
-            captchaToken: captchaToken ?? undefined,
-          },
-        });
-        if (error) {
-          throw error;
-        }
-        router.push("/");
-        router.refresh();
-      }
-    } catch (error) {
-      setMessage(
-        error instanceof Error ? error.message : "Authentication failed.",
-      );
-    } finally {
-      setLoading(false);
-      setCaptchaResetKey((value) => value + 1);
-    }
-  }
 
   async function handleGoogle() {
     setLoading(true);
@@ -127,27 +39,6 @@ export function AuthForm() {
 
   return (
     <div className="auth-card">
-      <div className="auth-tabs" role="tablist" aria-label="Account action">
-        <button
-          aria-selected={mode === "login"}
-          className={mode === "login" ? "auth-tab-active" : ""}
-          onClick={() => changeMode("login")}
-          role="tab"
-          type="button"
-        >
-          Sign in
-        </button>
-        <button
-          aria-selected={mode === "signup"}
-          className={mode === "signup" ? "auth-tab-active" : ""}
-          onClick={() => changeMode("signup")}
-          role="tab"
-          type="button"
-        >
-          Create account
-        </button>
-      </div>
-
       <button
         className="google-button"
         disabled={loading}
@@ -155,82 +46,19 @@ export function AuthForm() {
         type="button"
       >
         <GoogleMark />
-        Continue with Google
+        {loading ? "Opening Google…" : "Continue with Google"}
       </button>
 
-      <div className="auth-divider">
-        <span>or use email</span>
-      </div>
-
-      <form className="auth-form" onSubmit={handleEmail}>
-        <label>
-          <span>Email address</span>
-          <input
-            autoComplete="email"
-            onChange={(event) => setEmail(event.target.value)}
-            required
-            type="email"
-            value={email}
-          />
-        </label>
-        <label>
-          <span>Password</span>
-          <input
-            autoComplete={mode === "signup" ? "new-password" : "current-password"}
-            minLength={mode === "signup" ? 8 : undefined}
-            onChange={(event) => setPassword(event.target.value)}
-            required
-            type="password"
-            value={password}
-          />
-        </label>
-        {mode === "signup" ? (
-          <label>
-            <span>Confirm password</span>
-            <input
-              autoComplete="new-password"
-              minLength={8}
-              onChange={(event) => setConfirmation(event.target.value)}
-              required
-              type="password"
-              value={confirmation}
-            />
-          </label>
-        ) : null}
-
-        <TurnstileWidget
-          onTokenChange={onCaptchaTokenChange}
-          resetKey={captchaResetKey}
-        />
-
-        {message ? (
-          <p
-            className={success ? "form-message form-success" : "form-message"}
-            role="status"
-          >
-            {message}
-          </p>
-        ) : null}
-
-        <button className="primary-button auth-submit" disabled={loading} type="submit">
-          {loading
-            ? "Please wait…"
-            : mode === "signup"
-              ? "Create account"
-              : "Sign in"}
-        </button>
-      </form>
-
-      {mode === "login" ? (
-        <Link className="auth-link" href="/forgot-password">
-          Forgot your password?
-        </Link>
-      ) : (
-        <p className="auth-footnote">
-          After signing in, request access to your firing number. A range
-          administrator must approve it before shots are visible.
+      {message ? (
+        <p className="form-message auth-message" role="status">
+          {message}
         </p>
-      )}
+      ) : null}
+
+      <p className="auth-footnote">
+        Sign in with a Google account, then request access to your firing
+        number. A range administrator must approve it before shots are visible.
+      </p>
     </div>
   );
 }

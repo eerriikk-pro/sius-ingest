@@ -297,10 +297,10 @@ normalizer refuses to mix different projection versions silently.
 
 ## Run the local practice viewer
 
-The authenticated viewer lives in [`web/`](web/). Members can sign in with
-Google or a confirmed email/password account, request access to one or more
-firing numbers, and review approved shot histories. Administrators approve,
-reject, restore, and revoke those many-to-many assignments in the viewer.
+The authenticated viewer lives in [`web/`](web/). Members sign in with Google,
+request access to one or more firing numbers, and review approved shot
+histories. Administrators approve, reject, restore, and revoke those
+many-to-many assignments in the viewer.
 
 The viewer uses Supabase cookie-based Auth and row-level security. Its Next.js
 route queries Supabase with the signed-in user's JWT and the browser-safe
@@ -319,8 +319,7 @@ displayed dates and defaults to `America/Vancouver`.
 
 Before first use, apply [`supabase/schema.sql`](supabase/schema.sql) and follow
 the complete [member authentication setup](docs/member-auth-setup.md) for
-Google OAuth, Google Workspace SMTP relay, Turnstile, redirect URLs, and initial
-administrator promotion.
+Google OAuth, redirect URLs, and initial administrator promotion.
 
 The target display uses the scale inferred from the controlled SIUS capture:
 native X/Y coordinates are multiplied by 1000 to plot millimetres. The raw
@@ -367,7 +366,6 @@ Frequently used options have environment-variable equivalents:
 | `NEXT_PUBLIC_SUPABASE_URL` | none | browser-safe Supabase Auth URL |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | none | browser-safe Auth/Data API key |
 | `NEXT_PUBLIC_SITE_URL` | none | production viewer origin used by Auth |
-| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | none | Cloudflare CAPTCHA site key |
 
 Run `sius-ingest COMMAND --help` for all command-specific options.
 
