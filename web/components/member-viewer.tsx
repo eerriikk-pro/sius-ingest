@@ -207,6 +207,7 @@ function ActivityResults({ activity }: { activity: MemberActivity }) {
           {activity.sessions.map((session, index) => (
             <SessionCard
               key={session.id}
+              memberId={activity.memberId}
               session={session}
               sessionNumber={activity.sessions.length - index}
               timezone={activity.timezone}
