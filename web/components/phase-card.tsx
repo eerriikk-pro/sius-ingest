@@ -2,14 +2,23 @@
 
 import { useMemo, useState } from "react";
 
+import { PrintPhaseButton } from "@/components/print-phase-button";
 import { ShotTarget } from "@/components/shot-target";
 import type { ActivityPhase, ActivityShot } from "@/lib/types";
 
 interface PhaseCardProps {
+  laneNumber: number;
+  memberId: string;
   phase: ActivityPhase;
+  timezone: string;
 }
 
-export function PhaseCard({ phase }: PhaseCardProps) {
+export function PhaseCard({
+  laneNumber,
+  memberId,
+  phase,
+  timezone,
+}: PhaseCardProps) {
   const [hoveredShotKey, setHoveredShotKey] = useState<string | null>(null);
   const [selectedShotKeys, setSelectedShotKeys] = useState<Set<string>>(
     () => new Set(),
@@ -56,24 +65,32 @@ export function PhaseCard({ phase }: PhaseCardProps) {
           </span>
           <h4>{title}</h4>
         </div>
-        <div className="phase-stats">
-          <span>
-            <strong>{phase.stats.shotCount}</strong> shots
-          </span>
-          <span>
-            <strong>{phase.stats.scoreTotal.toFixed(1)}</strong> total
-          </span>
-          <span>
-            <strong>
-              {phase.stats.averageScore === null
-                ? "—"
-                : phase.stats.averageScore.toFixed(2)}
-            </strong>{" "}
-            avg
-          </span>
-          <span title="Target type inferred from the SIUS score encoding">
-            {phase.targetKind === "air-pistol" ? "Air pistol" : "Air rifle"}
-          </span>
+        <div className="phase-actions">
+          <div className="phase-stats">
+            <span>
+              <strong>{phase.stats.shotCount}</strong> shots
+            </span>
+            <span>
+              <strong>{phase.stats.scoreTotal.toFixed(1)}</strong> total
+            </span>
+            <span>
+              <strong>
+                {phase.stats.averageScore === null
+                  ? "—"
+                  : phase.stats.averageScore.toFixed(2)}
+              </strong>{" "}
+              avg
+            </span>
+            <span title="Target type inferred from the SIUS score encoding">
+              {phase.targetKind === "air-pistol" ? "Air pistol" : "Air rifle"}
+            </span>
+          </div>
+          <PrintPhaseButton
+            laneNumber={laneNumber}
+            memberId={memberId}
+            phase={phase}
+            timezone={timezone}
+          />
         </div>
       </header>
 

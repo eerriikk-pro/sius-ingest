@@ -3,12 +3,14 @@ import { formatDateTime } from "@/lib/format";
 import type { ActivitySession } from "@/lib/types";
 
 interface SessionCardProps {
+  memberId: string;
   session: ActivitySession;
   sessionNumber: number;
   timezone: string;
 }
 
 export function SessionCard({
+  memberId,
   session,
   sessionNumber,
   timezone,
@@ -39,7 +41,13 @@ export function SessionCard({
 
       <div className="phase-list">
         {session.phases.map((phase) => (
-          <PhaseCard key={phase.id} phase={phase} />
+          <PhaseCard
+            key={phase.id}
+            laneNumber={session.laneNumber}
+            memberId={memberId}
+            phase={phase}
+            timezone={timezone}
+          />
         ))}
       </div>
     </article>
