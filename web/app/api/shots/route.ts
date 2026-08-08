@@ -5,7 +5,8 @@ import { mayQueryMemberNumber } from "@/lib/authorization";
 import { getViewerEnvironment } from "@/lib/env";
 import {
   getMemberActivity,
-  parseDays,
+  parseCursor,
+  parseDateRange,
   RequestValidationError,
   validateMemberId,
 } from "@/lib/member-activity";
@@ -26,7 +27,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const memberNumber = validateMemberId(
       request.nextUrl.searchParams.get("memberNumber") ?? "",
     );
-    const days = parseDays(request.nextUrl.searchParams.get("days"));
+    const dateRange = parseDateRange(
+      request.nextUrl.searchParams.get("from"),
+      request.nextUrl.searchParams.get("to"),
+      environment.timezone,
+    );
+    const before = parseCursor(request.nextUrl.searchParams.get("before"));
     const approved = approvedMemberNumbers(context, environment.rangeId);
 
     if (!mayQueryMemberNumber(context.role, approved, memberNumber)) {
@@ -40,7 +46,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const activity = await getMemberActivity(
       supabase,
       memberNumber,
-      days,
+      dateRange,
+      before,
     );
     return NextResponse.json(activity, {
       headers: {

@@ -50,8 +50,6 @@ button {
 
 .app-header,
 .results-heading-row,
-.session-header,
-.phase-header,
 .target-toolbar,
 .series-heading {
   align-items: center;
@@ -75,7 +73,7 @@ button {
 
 .eyebrow,
 .section-kicker,
-.session-label {
+.day-label {
   color: var(--gold-deep);
   font-size: 0.73rem;
   font-weight: 800;
@@ -108,7 +106,7 @@ button {
 }
 
 .search-card,
-.session-card,
+.day-card,
 .loading-card,
 .empty-state {
   background: rgb(255 253 246 / 94%);
@@ -126,7 +124,7 @@ button {
 
 .search-card h2,
 .results h2,
-.session-card h3,
+.day-card h3,
 .phase-card h4 {
   margin: 0;
 }
@@ -143,7 +141,7 @@ button {
   align-items: end;
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(180px, 1fr) 110px auto;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, auto) auto;
 }
 
 .search-form label {
@@ -172,6 +170,64 @@ button {
 .search-form select:focus {
   border-color: var(--gold-deep);
   box-shadow: 0 0 0 3px rgb(228 185 47 / 20%);
+}
+
+.date-filter {
+  position: relative;
+}
+
+.date-filter summary {
+  align-items: center;
+  background: #fffef9;
+  border: 1px solid #cfc3a4;
+  border-radius: 10px;
+  cursor: pointer;
+  display: flex;
+  font-size: 0.82rem;
+  font-weight: 740;
+  justify-content: space-between;
+  list-style: none;
+  min-height: 44px;
+  padding: 9px 12px;
+}
+
+.date-filter summary::-webkit-details-marker {
+  display: none;
+}
+
+.date-filter summary::after {
+  content: "+";
+  font-size: 1rem;
+  margin-left: 12px;
+}
+
+.date-filter[open] summary::after {
+  content: "−";
+}
+
+.date-filter-fields {
+  background: var(--paper);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr 1fr;
+  margin-top: 8px;
+  min-width: 330px;
+  padding: 14px;
+  position: absolute;
+  right: 0;
+  z-index: 4;
+}
+
+.date-clear-button {
+  grid-column: 1 / -1;
+}
+
+.date-clear-button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .auth-shell {
@@ -659,35 +715,53 @@ button {
   text-transform: uppercase;
 }
 
-.session-list {
+.day-list {
   display: grid;
-  gap: 24px;
+  gap: 14px;
 }
 
-.session-card {
+.day-card {
   border-radius: 22px;
   overflow: hidden;
 }
 
-.session-header {
+.day-header {
   background: linear-gradient(105deg, #292821 0%, #3b392f 100%);
   color: #fffdf6;
-  gap: 24px;
-  padding: 22px 24px;
 }
 
-.session-header h3 {
+.day-toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+  padding: 22px 24px;
+  text-align: left;
+  width: 100%;
+}
+
+.day-toggle:focus-visible,
+.phase-toggle:focus-visible {
+  box-shadow: inset 0 0 0 3px var(--gold);
+  outline: none;
+}
+
+.day-header h3 {
   font-family: Georgia, "Times New Roman", serif;
   font-size: 1.45rem;
   font-weight: 500;
   margin-top: 5px;
 }
 
-.session-label {
+.day-label {
   color: #e7c95e;
 }
 
-.session-meta,
+.day-meta,
 .phase-stats,
 .phase-actions {
   display: flex;
@@ -696,12 +770,8 @@ button {
   justify-content: flex-end;
 }
 
-.phase-actions {
-  align-items: center;
-}
-
-.session-meta span,
-.phase-stats span {
+.day-meta > span,
+.phase-stats > span {
   border: 1px solid rgb(255 255 255 / 22%);
   border-radius: 999px;
   font-size: 0.75rem;
@@ -716,7 +786,7 @@ button {
 .phase-card {
   background: var(--paper);
   border-top: 1px solid var(--border);
-  padding: 24px;
+  padding: 0;
 }
 
 .phase-sighter {
@@ -728,19 +798,41 @@ button {
 }
 
 .phase-header {
-  align-items: flex-start;
-  gap: 18px;
-  margin-bottom: 18px;
+  align-items: center;
+  display: flex;
+  margin: 0;
 }
 
-.phase-header > div:first-child {
+.phase-toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  display: flex;
+  gap: 18px;
+  flex: 1;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 22px 24px;
+  text-align: left;
+  width: 100%;
+}
+
+.phase-title {
   align-items: center;
   display: flex;
   gap: 10px;
 }
 
-.phase-header h4 {
+.phase-title h4 {
   font-size: 1.1rem;
+}
+
+.phase-title small {
+  color: var(--muted-ink);
+  display: block;
+  font-size: 0.7rem;
+  margin-top: 3px;
 }
 
 .phase-badge {
@@ -769,6 +861,12 @@ button {
 
 .phase-stats strong {
   color: var(--ink);
+}
+
+.phase-actions {
+  align-items: center;
+  flex-shrink: 0;
+  padding-right: 24px;
 }
 
 .phase-print-button {
@@ -946,6 +1044,19 @@ button {
   display: grid;
   gap: 24px;
   grid-template-columns: minmax(260px, 420px) 1fr;
+  padding: 0 24px 24px;
+}
+
+.expand-label {
+  align-items: center;
+  display: inline-flex;
+  gap: 7px;
+}
+
+.expand-chevron {
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 0.75;
 }
 
 .target-panel {
@@ -1137,6 +1248,36 @@ button {
   margin: 18px 4px 0;
 }
 
+.load-more {
+  display: flex;
+  justify-content: center;
+  min-height: 92px;
+  padding: 28px 0 8px;
+}
+
+.load-more-button {
+  background: rgb(255 253 246 / 78%);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-ink);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 760;
+  padding: 10px 16px;
+}
+
+.load-more-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.history-end {
+  color: var(--muted-ink);
+  font-size: 0.76rem;
+  margin: 24px 0 0;
+  text-align: center;
+}
+
 @media (max-width: 1080px) {
   .auth-shell {
     gap: 50px;
@@ -1192,9 +1333,7 @@ button {
 
   .app-header,
   .compact-header,
-  .results-heading-row,
-  .session-header,
-  .phase-header {
+  .results-heading-row {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -1212,11 +1351,20 @@ button {
   }
 
   .search-form {
-    grid-template-columns: 1fr 100px;
+    grid-template-columns: 1fr;
   }
 
   .primary-button {
-    grid-column: 1 / -1;
+    grid-column: 1;
+  }
+
+  .date-filter-fields {
+    grid-template-columns: 1fr;
+    left: auto;
+    min-width: 0;
+    position: static;
+    right: auto;
+    width: 100%;
   }
 
   .summary-grid {
@@ -1227,22 +1375,42 @@ button {
     text-align: left;
   }
 
-  .session-meta,
+  .day-toggle,
+  .phase-toggle {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .day-meta,
   .phase-stats,
   .phase-actions {
     justify-content: flex-start;
+  }
+
+  .day-toggle {
+    padding: 18px 14px;
   }
 
   .print-settings-grid {
     grid-template-columns: 1fr;
   }
 
-  .phase-card {
-    padding: 18px 14px;
+  .phase-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .phase-toggle {
+    padding: 18px 14px 0;
+  }
+
+  .phase-actions {
+    padding: 0 14px 18px;
   }
 
   .phase-content {
     grid-template-columns: 1fr;
+    padding: 0 14px 18px;
   }
 
   .target-panel {

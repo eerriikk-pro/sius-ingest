@@ -58,13 +58,13 @@ export interface ActivitySummary extends ActivityStats {
 
 export interface MemberActivity {
   memberId: string;
-  days: number;
-  from: string;
-  to: string;
+  dateFrom: string | null;
+  dateTo: string | null;
   timezone: string;
   coordinateNote: string;
   summary: ActivitySummary;
   sessions: ActivitySession[];
+  nextCursor: string | null;
 }
 
 export interface ApiErrorResponse {
