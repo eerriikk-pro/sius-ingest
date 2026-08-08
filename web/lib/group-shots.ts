@@ -34,10 +34,10 @@ interface MutableSession {
 
 export interface GroupShotsOptions {
   memberId: string;
-  days: number;
-  from: Date;
-  to: Date;
+  dateFrom: string | null;
+  dateTo: string | null;
   timezone: string;
+  nextCursor: string | null;
 }
 
 export function groupMemberShots(
@@ -73,9 +73,8 @@ export function groupMemberShots(
 
   return {
     memberId: options.memberId,
-    days: options.days,
-    from: options.from.toISOString(),
-    to: options.to.toISOString(),
+    dateFrom: options.dateFrom,
+    dateTo: options.dateTo,
     timezone: options.timezone,
     coordinateNote:
       "Target coordinates use the observed SIUS native-to-millimetre scale (×1000).",
@@ -88,6 +87,7 @@ export function groupMemberShots(
       sighterShotCount: sighterShots.length,
     },
     sessions: groupedSessions,
+    nextCursor: options.nextCursor,
   };
 }
 

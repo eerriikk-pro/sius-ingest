@@ -108,10 +108,10 @@ test("infers the pistol target only from the observed secondary score encoding",
 function options() {
   return {
     memberId: "513",
-    days: 7,
-    from: FROM,
-    to: TO,
+    dateFrom: FROM.toISOString().slice(0, 10),
+    dateTo: TO.toISOString().slice(0, 10),
     timezone: "America/Vancouver",
+    nextCursor: null,
   };
 }
 

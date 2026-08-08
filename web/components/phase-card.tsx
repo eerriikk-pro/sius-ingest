@@ -1,15 +1,17 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 
 import { ShotTarget } from "@/components/shot-target";
 import type { ActivityPhase, ActivityShot } from "@/lib/types";
 
 interface PhaseCardProps {
+  contextLabel?: string;
   phase: ActivityPhase;
 }
 
-export function PhaseCard({ phase }: PhaseCardProps) {
+export function PhaseCard({ contextLabel, phase }: PhaseCardProps) {
+  const [expanded, setExpanded] = useState(false);
   const [hoveredShotKey, setHoveredShotKey] = useState<string | null>(null);
   const [selectedShotKeys, setSelectedShotKeys] = useState<Set<string>>(
     () => new Set(),
@@ -19,6 +21,7 @@ export function PhaseCard({ phase }: PhaseCardProps) {
   const title = isMatch
     ? `Match relay ${phase.ordinal}`
     : `Sighter block ${phase.ordinal}`;
+  const contentId = useId();
 
   function toggleShot(shotKey: string) {
     setSelectedShotKeys((current) => {
@@ -50,34 +53,52 @@ export function PhaseCard({ phase }: PhaseCardProps) {
   return (
     <section className={`phase-card phase-${phase.kind}`}>
       <header className="phase-header">
-        <div>
-          <span className={`phase-badge phase-badge-${phase.kind}`}>
-            {isMatch ? "Match" : "Sighters"}
-          </span>
-          <h4>{title}</h4>
-        </div>
-        <div className="phase-stats">
-          <span>
-            <strong>{phase.stats.shotCount}</strong> shots
-          </span>
-          <span>
-            <strong>{phase.stats.scoreTotal.toFixed(1)}</strong> total
-          </span>
-          <span>
-            <strong>
-              {phase.stats.averageScore === null
-                ? "—"
-                : phase.stats.averageScore.toFixed(2)}
-            </strong>{" "}
-            avg
-          </span>
-          <span title="Target type inferred from the SIUS score encoding">
-            {phase.targetKind === "air-pistol" ? "Air pistol" : "Air rifle"}
-          </span>
-        </div>
+        <button
+          aria-controls={contentId}
+          aria-expanded={expanded}
+          className="phase-toggle"
+          onClick={() => setExpanded((current) => !current)}
+          type="button"
+        >
+          <div className="phase-title">
+            <span className={`phase-badge phase-badge-${phase.kind}`}>
+              {isMatch ? "Match" : "Sighters"}
+            </span>
+            <div>
+              <h4>{title}</h4>
+              {contextLabel ? <small>{contextLabel}</small> : null}
+            </div>
+          </div>
+          <div className="phase-stats">
+            <span>
+              <strong>{phase.stats.shotCount}</strong>{" "}
+              {phase.stats.shotCount === 1 ? "shot" : "shots"}
+            </span>
+            <span>
+              <strong>{phase.stats.scoreTotal.toFixed(1)}</strong> total
+            </span>
+            <span>
+              <strong>
+                {phase.stats.averageScore === null
+                  ? "—"
+                  : phase.stats.averageScore.toFixed(2)}
+              </strong>{" "}
+              avg
+            </span>
+            <span title="Target type inferred from the SIUS score encoding">
+              {phase.targetKind === "air-pistol" ? "Air pistol" : "Air rifle"}
+            </span>
+            <span className="expand-label">
+              {expanded ? "Hide shots" : "Show shots"}
+              <span aria-hidden="true" className="expand-chevron">
+                {expanded ? "−" : "+"}
+              </span>
+            </span>
+          </div>
+        </button>
       </header>
 
-      <div className="phase-content">
+      {expanded ? <div className="phase-content" id={contentId}>
         <ShotTarget
           hoveredShotKey={hoveredShotKey}
           selectedShotKeys={selectedShotKeys}
@@ -146,7 +167,7 @@ export function PhaseCard({ phase }: PhaseCardProps) {
             </p>
           )}
         </div>
-      </div>
+      </div> : null}
     </section>
   );
 }

@@ -1,16 +1,28 @@
 "use client";
 
-import { FormEvent, useRef, useState } from "react";
+import {
+  FormEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
-import { SessionCard } from "@/components/session-card";
-import { formatDateTime } from "@/lib/format";
+import { DayCard } from "@/components/day-card";
+import { groupSessionsByDay } from "@/lib/activity-days";
+import { mergeActivityPages } from "@/lib/activity-pages";
+import { formatInputDate } from "@/lib/format";
 import type { ApiErrorResponse, MemberActivity } from "@/lib/types";
-
-const DEFAULT_DAYS = 7;
 
 interface MemberViewerProps {
   approvedMemberNumbers: string[];
   isAdmin: boolean;
+}
+
+interface ActivityQuery {
+  dateFrom: string;
+  dateTo: string;
+  memberId: string;
 }
 
 export function MemberViewer({
@@ -20,10 +32,16 @@ export function MemberViewer({
   const [memberId, setMemberId] = useState(
     approvedMemberNumbers.length === 1 ? approvedMemberNumbers[0] : "",
   );
-  const [days, setDays] = useState(DEFAULT_DAYS);
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [activeQuery, setActiveQuery] = useState<ActivityQuery | null>(null);
   const [activity, setActivity] = useState<MemberActivity | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loadingInitial, setLoadingInitial] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const loadingMoreRef = useRef(false);
+  const loadMoreTriggerRef = useRef<HTMLDivElement>(null);
+  const loadMoreCallbackRef = useRef<() => Promise<void>>(async () => {});
   const requestNumber = useRef(0);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -33,48 +51,94 @@ export function MemberViewer({
       setError("Enter a member ID.");
       return;
     }
-    if (!Number.isInteger(days) || days < 1 || days > 365) {
-      setError("Days must be a whole number from 1 to 365.");
+    if (Boolean(dateFrom) !== Boolean(dateTo)) {
+      setError("Choose both a start date and an end date.");
+      return;
+    }
+    if (dateFrom && dateTo && dateFrom > dateTo) {
+      setError("The start date must be on or before the end date.");
       return;
     }
 
+    const query = {
+      dateFrom,
+      dateTo,
+      memberId: normalizedMemberId,
+    };
     const currentRequest = ++requestNumber.current;
-    setLoading(true);
+    setActiveQuery(query);
+    setActivity(null);
+    setLoadingInitial(true);
     setError(null);
+    loadingMoreRef.current = false;
+    setLoadingMore(false);
 
     try {
-      const response = await fetch(
-        `/api/shots?memberNumber=${encodeURIComponent(normalizedMemberId)}&days=${days}`,
-        {
-          cache: "no-store",
-        },
-      );
-      const body = (await response.json()) as MemberActivity | ApiErrorResponse;
-      if (!response.ok) {
-        throw new Error("error" in body ? body.error : "The lookup failed.");
+      const result = await requestActivity(query, null);
+      if (currentRequest === requestNumber.current) {
+        setActivity(result);
       }
-      if (currentRequest !== requestNumber.current) {
-        return;
-      }
-
-      const result = body as MemberActivity;
-      setActivity(result);
     } catch (requestError) {
-      if (currentRequest !== requestNumber.current) {
-        return;
+      if (currentRequest === requestNumber.current) {
+        setError(messageFromError(requestError));
       }
-      setActivity(null);
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "The lookup failed.",
-      );
     } finally {
       if (currentRequest === requestNumber.current) {
-        setLoading(false);
+        setLoadingInitial(false);
       }
     }
   }
+
+  const loadMore = useCallback(async () => {
+    const cursor = activity?.nextCursor;
+    if (!activeQuery || !cursor || loadingMoreRef.current) {
+      return;
+    }
+
+    const currentRequest = requestNumber.current;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const nextPage = await requestActivity(activeQuery, cursor);
+      if (currentRequest === requestNumber.current) {
+        setActivity((current) =>
+          current ? mergeActivityPages(current, nextPage) : nextPage,
+        );
+      }
+    } catch (requestError) {
+      if (currentRequest === requestNumber.current) {
+        setError(messageFromError(requestError));
+      }
+    } finally {
+      if (currentRequest === requestNumber.current) {
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      }
+    }
+  }, [activeQuery, activity?.nextCursor]);
+
+  useEffect(() => {
+    loadMoreCallbackRef.current = loadMore;
+  }, [loadMore]);
+
+  const canLoadMore = Boolean(activity?.nextCursor);
+  useEffect(() => {
+    const trigger = loadMoreTriggerRef.current;
+    if (!canLoadMore || !trigger) {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          void loadMoreCallbackRef.current();
+        }
+      },
+      { rootMargin: "320px 0px" },
+    );
+    observer.observe(trigger);
+    return () => observer.disconnect();
+  }, [canLoadMore]);
 
   return (
     <>
@@ -82,7 +146,7 @@ export function MemberViewer({
         <div>
           <p className="section-kicker">Member history</p>
           <h2 id="lookup-heading">
-            {isAdmin ? "Find recent practice" : "Your recent practice"}
+            {isAdmin ? "Find practice activity" : "Your practice activity"}
           </h2>
         </div>
         <form className="search-form" onSubmit={handleSubmit}>
@@ -115,34 +179,103 @@ export function MemberViewer({
               />
             )}
           </label>
-          <label className="days-field">
-            <span>Past days</span>
-            <input
-              max={365}
-              min={1}
-              name="days"
-              onChange={(event) => setDays(Number(event.target.value))}
-              type="number"
-              value={days}
-            />
-          </label>
-          <button className="primary-button" disabled={loading} type="submit">
-            {loading ? "Loading…" : "View shots"}
+          <details className="date-filter">
+            <summary>
+              {dateFrom && dateTo ? "Custom dates active" : "Custom date range"}
+            </summary>
+            <div className="date-filter-fields">
+              <label>
+                <span>From</span>
+                <input
+                  name="from"
+                  onChange={(event) => {
+                    setDateFrom(event.target.value);
+                    if (!dateTo) {
+                      setDateTo(event.target.value);
+                    }
+                  }}
+                  type="date"
+                  value={dateFrom}
+                />
+              </label>
+              <label>
+                <span>To</span>
+                <input
+                  min={dateFrom || undefined}
+                  name="to"
+                  onChange={(event) => setDateTo(event.target.value)}
+                  type="date"
+                  value={dateTo}
+                />
+              </label>
+              <button
+                className="clear-button date-clear-button"
+                disabled={!dateFrom && !dateTo}
+                onClick={() => {
+                  setDateFrom("");
+                  setDateTo("");
+                }}
+                type="button"
+              >
+                Clear dates
+              </button>
+            </div>
+          </details>
+          <button
+            className="primary-button"
+            disabled={loadingInitial}
+            type="submit"
+          >
+            {loadingInitial ? "Loading…" : "View shots"}
           </button>
         </form>
         <p className="search-note">
-          Results are read-only and limited by Supabase row-level security.
+          Newest activity loads first. Open the date range only when you need a
+          specific day or period.
         </p>
       </section>
 
       <div aria-live="polite">
         {error ? <p className="error-banner">{error}</p> : null}
-        {loading ? <LoadingState /> : null}
+        {loadingInitial ? <LoadingState /> : null}
       </div>
 
-      {!loading && activity ? <ActivityResults activity={activity} /> : null}
+      {!loadingInitial && activity ? (
+        <ActivityResults
+          activity={activity}
+          loadMore={loadMore}
+          loadingMore={loadingMore}
+          loadMoreTriggerRef={loadMoreTriggerRef}
+        />
+      ) : null}
     </>
   );
+}
+
+async function requestActivity(
+  query: ActivityQuery,
+  before: string | null,
+): Promise<MemberActivity> {
+  const parameters = new URLSearchParams({ memberNumber: query.memberId });
+  if (query.dateFrom && query.dateTo) {
+    parameters.set("from", query.dateFrom);
+    parameters.set("to", query.dateTo);
+  }
+  if (before) {
+    parameters.set("before", before);
+  }
+  const response = await fetch(`/api/shots?${parameters}`, {
+    cache: "no-store",
+  });
+  const body = (await response.json()) as MemberActivity | ApiErrorResponse;
+  if (!response.ok) {
+    throw new Error("error" in body ? body.error : "The lookup failed.");
+  }
+  return body as MemberActivity;
+}
+
+function messageFromError(error: unknown): string {
+  return error instanceof Error ? error.message : "The lookup failed.";
 }
 
 function LoadingState() {
@@ -155,36 +288,46 @@ function LoadingState() {
   );
 }
 
-function ActivityResults({ activity }: { activity: MemberActivity }) {
+interface ActivityResultsProps {
+  activity: MemberActivity;
+  loadMore: () => Promise<void>;
+  loadingMore: boolean;
+  loadMoreTriggerRef: React.RefObject<HTMLDivElement | null>;
+}
+
+function ActivityResults({
+  activity,
+  loadMore,
+  loadingMore,
+  loadMoreTriggerRef,
+}: ActivityResultsProps) {
   const { summary } = activity;
+  const days = groupSessionsByDay(activity.sessions, activity.timezone);
+  const dateCopy =
+    activity.dateFrom && activity.dateTo
+      ? `${formatInputDate(activity.dateFrom)} to ${formatInputDate(activity.dateTo)}`
+      : "Most recent to less recent";
 
   return (
     <section className="results" aria-labelledby="results-heading">
       <div className="results-heading-row">
         <div>
           <p className="section-kicker">
-            Past {activity.days} {activity.days === 1 ? "day" : "days"}
+            {activity.dateFrom ? "Custom date range" : "Newest first"}
           </p>
           <h2 id="results-heading">Member {activity.memberId}</h2>
         </div>
         <p className="range-copy">
-          {formatDateTime(activity.from, activity.timezone)} to{" "}
-          {formatDateTime(activity.to, activity.timezone)}
+          {dateCopy} · {activity.sessions.length} practice {activity.sessions.length === 1 ? "session" : "sessions"} loaded
         </p>
       </div>
 
       <div className="summary-grid">
-        <SummaryValue label="Shots" value={summary.shotCount} />
+        <SummaryValue label="Shots loaded" value={summary.shotCount} />
         <SummaryValue label="Match relays" value={summary.relayCount} />
-        <SummaryValue
-          label="Match shots"
-          value={summary.matchShotCount}
-        />
-        <SummaryValue
-          label="Sighters"
-          value={summary.sighterShotCount}
-        />
-        <SummaryValue label="Sessions" value={summary.sessionCount} />
+        <SummaryValue label="Match shots" value={summary.matchShotCount} />
+        <SummaryValue label="Sighters" value={summary.sighterShotCount} />
+        <SummaryValue label="Days loaded" value={days.length} />
         <SummaryValue
           label="Best"
           value={summary.bestScore === null ? "—" : summary.bestScore.toFixed(1)}
@@ -198,22 +341,32 @@ function ActivityResults({ activity }: { activity: MemberActivity }) {
           </div>
           <h3>No shots found</h3>
           <p>
-            There are no normalized shots for member {activity.memberId} in this
-            time window.
+            No normalized shots were found for member {activity.memberId}
+            {activity.dateFrom ? " in this date range" : ""}.
           </p>
         </div>
       ) : (
-        <div className="session-list">
-          {activity.sessions.map((session, index) => (
-            <SessionCard
-              key={session.id}
-              session={session}
-              sessionNumber={activity.sessions.length - index}
-              timezone={activity.timezone}
-            />
+        <div className="day-list">
+          {days.map((day) => (
+            <DayCard day={day} key={day.dateKey} timezone={activity.timezone} />
           ))}
         </div>
       )}
+
+      {activity.nextCursor ? (
+        <div className="load-more" ref={loadMoreTriggerRef}>
+          <button
+            className="load-more-button"
+            disabled={loadingMore}
+            onClick={() => void loadMore()}
+            type="button"
+          >
+            {loadingMore ? "Loading older activity…" : "Load older activity"}
+          </button>
+        </div>
+      ) : activity.sessions.length > 0 ? (
+        <p className="history-end">You’ve reached the oldest activity.</p>
+      ) : null}
 
       <p className="coordinate-note">{activity.coordinateNote}</p>
     </section>
