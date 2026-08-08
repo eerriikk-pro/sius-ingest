@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { getTargetGeometry } from "@/lib/target-geometry";
 import type { ActivityShot, TargetKind } from "@/lib/types";
 
 interface ShotTargetProps {
@@ -11,33 +12,6 @@ interface ShotTargetProps {
   selectedShotKeys: Set<string>;
 }
 
-const RIFLE_RINGS = [
-  { radius: 91, fill: "#fffdf5", stroke: "#c9c2ad" },
-  { radius: 81, fill: "#fffdf5", stroke: "#c9c2ad" },
-  { radius: 71, fill: "#fffdf5", stroke: "#c9c2ad" },
-  { radius: 61, fill: "#20221f", stroke: "#fffdf5" },
-  { radius: 51, fill: "#20221f", stroke: "#fffdf5" },
-  { radius: 41, fill: "#20221f", stroke: "#fffdf5" },
-  { radius: 31, fill: "#20221f", stroke: "#fffdf5" },
-  { radius: 21, fill: "#20221f", stroke: "#fffdf5" },
-  { radius: 11, fill: "#20221f", stroke: "#fffdf5" },
-  { radius: 1, fill: "#fffdf5", stroke: "#fffdf5" },
-] as const;
-
-const PISTOL_RINGS = [
-  { radius: 311, fill: "#fffdf5", stroke: "#c9c2ad" },
-  { radius: 279, fill: "#fffdf5", stroke: "#c9c2ad" },
-  { radius: 247, fill: "#fffdf5", stroke: "#c9c2ad" },
-  { radius: 215, fill: "#fffdf5", stroke: "#c9c2ad" },
-  { radius: 183, fill: "#fffdf5", stroke: "#c9c2ad" },
-  { radius: 151, fill: "#fffdf5", stroke: "#c9c2ad" },
-  { radius: 119, fill: "#20221f", stroke: "#fffdf5" },
-  { radius: 87, fill: "#20221f", stroke: "#fffdf5" },
-  { radius: 55, fill: "#20221f", stroke: "#fffdf5" },
-  { radius: 23, fill: "#20221f", stroke: "#fffdf5" },
-  { radius: 10, fill: "#fffdf5", stroke: "#fffdf5" },
-] as const;
-
 export function ShotTarget({
   shots,
   targetKind,
@@ -46,10 +20,8 @@ export function ShotTarget({
 }: ShotTargetProps) {
   const [zoom, setZoom] = useState(1);
   const isPistol = targetKind === "air-pistol";
-  const baseScale = isPistol ? 0.3 : 1;
-  const scale = baseScale * zoom;
-  const rings = isPistol ? PISTOL_RINGS : RIFLE_RINGS;
-  const shotRadius = isPistol ? 18 : 8;
+  const geometry = getTargetGeometry(targetKind);
+  const scale = geometry.baseScale * zoom;
   const hasSelection = selectedShotKeys.size > 0;
 
   return (
@@ -85,14 +57,14 @@ export function ShotTarget({
       >
         <rect fill="#f4ead0" height="200" width="200" />
         <g transform={`translate(100 100) scale(${scale}) translate(-100 -100)`}>
-          {rings.map((ring, index) => (
+          {geometry.rings.map((ring, index) => (
             <circle
               cx="100"
               cy="100"
-              fill={ring.fill}
+              fill={ring.black ? "#20221f" : "#fffdf5"}
               key={`${ring.radius}-${index}`}
               r={ring.radius}
-              stroke={ring.stroke}
+              stroke={ring.black ? "#fffdf5" : "#c9c2ad"}
               strokeWidth="1"
             />
           ))}
@@ -108,7 +80,11 @@ export function ShotTarget({
                 fill={hovered ? "#f4c430" : "#ed5b67"}
                 key={shot.shotKey}
                 opacity={muted ? 0.2 : hovered || selected ? 1 : 0.78}
-                r={hovered || selected ? shotRadius * 1.15 : shotRadius}
+                r={
+                  hovered || selected
+                    ? geometry.shotRadius * 1.15
+                    : geometry.shotRadius
+                }
                 stroke={selected ? "#f4c430" : "#20221f"}
                 strokeWidth={selected ? 3 : 1.5}
               >

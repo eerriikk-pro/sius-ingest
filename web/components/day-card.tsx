@@ -8,10 +8,11 @@ import type { ActivityDay } from "@/lib/activity-days";
 
 interface DayCardProps {
   day: ActivityDay;
+  memberId: string;
   timezone: string;
 }
 
-export function DayCard({ day, timezone }: DayCardProps) {
+export function DayCard({ day, memberId, timezone }: DayCardProps) {
   const [expanded, setExpanded] = useState(false);
   const contentId = useId();
   const sessionLabel = `${day.sessions.length} practice ${
@@ -65,7 +66,10 @@ export function DayCard({ day, timezone }: DayCardProps) {
               <PhaseCard
                 contextLabel={`Lane ${session.laneNumber} · ${formatTime(session.startedAt, timezone)}`}
                 key={phase.id}
+                laneNumber={session.laneNumber}
+                memberId={memberId}
                 phase={phase}
+                timezone={timezone}
               />
             )),
           )}

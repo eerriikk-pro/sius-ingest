@@ -348,7 +348,12 @@ function ActivityResults({
       ) : (
         <div className="day-list">
           {days.map((day) => (
-            <DayCard day={day} key={day.dateKey} timezone={activity.timezone} />
+            <DayCard
+              day={day}
+              key={day.dateKey}
+              memberId={activity.memberId}
+              timezone={activity.timezone}
+            />
           ))}
         </div>
       )}
