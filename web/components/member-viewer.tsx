@@ -43,6 +43,8 @@ export function MemberViewer({
   const loadMoreTriggerRef = useRef<HTMLDivElement>(null);
   const loadMoreCallbackRef = useRef<() => Promise<void>>(async () => {});
   const requestNumber = useRef(0);
+  const formRef = useRef<HTMLFormElement>(null);
+  const hasAutoLoaded = useRef(false);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -140,6 +142,17 @@ export function MemberViewer({
     return () => observer.disconnect();
   }, [canLoadMore]);
 
+  useEffect(() => {
+    if (
+      !isAdmin &&
+      approvedMemberNumbers.length === 1 &&
+      !hasAutoLoaded.current
+    ) {
+      hasAutoLoaded.current = true;
+      formRef.current?.requestSubmit();
+    }
+  }, [approvedMemberNumbers, isAdmin]);
+
   return (
     <>
       <section className="search-card" aria-labelledby="lookup-heading">
@@ -149,17 +162,19 @@ export function MemberViewer({
             {isAdmin ? "Find practice activity" : "Your practice activity"}
           </h2>
         </div>
-        <form className="search-form" onSubmit={handleSubmit}>
+        <form className="search-form" onSubmit={handleSubmit} ref={formRef}>
           <label>
             <span>Member ID</span>
-            {!isAdmin && approvedMemberNumbers.length > 1 ? (
+            {!isAdmin ? (
               <select
                 name="memberId"
                 onChange={(event) => setMemberId(event.target.value)}
                 required
                 value={memberId}
               >
-                <option value="">Select a member</option>
+                {approvedMemberNumbers.length > 1 ? (
+                  <option value="">Select a member</option>
+                ) : null}
                 {approvedMemberNumbers.map((number) => (
                   <option key={number} value={number}>
                     {number}
@@ -174,7 +189,6 @@ export function MemberViewer({
                 name="memberId"
                 onChange={(event) => setMemberId(event.target.value)}
                 placeholder="e.g. 513"
-                readOnly={!isAdmin && approvedMemberNumbers.length === 1}
                 value={memberId}
               />
             )}
